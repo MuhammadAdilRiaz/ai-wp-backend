@@ -92,10 +92,17 @@ router.post('/login', async (req, res) => {
     res.json({ user: data.user, session: data.session });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
+/// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/auth/oauth-url?provider=google|github
 // Returns the OAuth redirect URL — frontend opens this in a popup or redirect
 // ─────────────────────────────────────────────────────────────────────────────
+
+// List of frontend URLs allowed to receive the OAuth redirect
+const ALLOWED_FRONTEND_URLS = [
+    process.env.FRONTEND_URL,          // production, e.g. https://derbypetstore.com
+    'http://localhost:3000',           // local dev
+];
+
 router.get('/oauth-url', async (req, res) => {
     const provider  = req.query.provider; // 'google' or 'github'
     const siteUrl   = req.query.site_url || '';
@@ -105,8 +112,13 @@ router.get('/oauth-url', async (req, res) => {
         return res.status(400).json({ error: 'Provider must be google or github.' });
     }
 
-    // After OAuth, redirect back to frontend with session
-    const redirectTo = `${process.env.FRONTEND_URL}/auth/callback?site_url=${encodeURIComponent(siteUrl)}&site_token=${encodeURIComponent(siteToken)}`;
+    // Figure out which frontend this request came from
+    const origin = req.query.origin || req.headers.origin || req.headers.referer || '';
+    const matchedOrigin = ALLOWED_FRONTEND_URLS.find(url => url && origin.startsWith(url));
+    const baseUrl = matchedOrigin || process.env.FRONTEND_URL; // fallback to production
+
+    // After OAuth, redirect back to whichever frontend the request came from
+    const redirectTo = `${baseUrl}/auth/callback?site_url=${encodeURIComponent(siteUrl)}&site_token=${encodeURIComponent(siteToken)}`;
 
     const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
@@ -117,7 +129,6 @@ router.get('/oauth-url', async (req, res) => {
 
     res.json({ url: data.url });
 });
-
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/auth/oauth-callback
 // Body: { code } — exchanges OAuth code for session (called by frontend)
