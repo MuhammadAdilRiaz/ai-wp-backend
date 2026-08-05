@@ -2,6 +2,8 @@ const express      = require('express');
 const supabase     = require('../lib/supabase');
 const { requireAuth }           = require('../middleware/auth');
 const { chatWithClaude }        = require('../services/claude');
+const { chatWithGPT }           = require('../services/openai');
+const { selectProvider }        = require('../services/modelRouter');
 const { sendActionToWordPress, getWordPressContext } = require('../services/wordpress');
 const router       = express.Router();
 
@@ -59,16 +61,20 @@ router.post('/message', async (req, res) => {
         { role: 'user', content: message },
     ];
 
-    // ── 5. Ask Claude what to do ──────────────────────────────────────────────
-    let claudeResult;
+    // ── 5. Decide which AI provider to use, then ask it what to do ────────────
+    const provider = selectProvider(profile);
+
+    let aiResult;
     try {
-        claudeResult = await chatWithClaude(messages, wpContext);
+        aiResult = provider === 'claude'
+            ? await chatWithClaude(messages, wpContext)
+            : await chatWithGPT(messages, wpContext);
     } catch (err) {
-        console.error('Claude API error:', err);
+        console.error(`${provider} API error:`, err);
         return res.status(500).json({ error: 'AI is temporarily unavailable. Please try again.' });
     }
 
-    const { parsed } = claudeResult;
+    const { parsed } = aiResult;
     const actionsToRun = parsed.actions || [];
     const actionResults = [];
 
@@ -132,6 +138,7 @@ router.post('/message', async (req, res) => {
         action_results: actionResults,
         credits_used:   CREDITS_PER_MESSAGE,
         credits_left:   updatedProfile?.credits || 0,
+        provider,
     });
 });
 

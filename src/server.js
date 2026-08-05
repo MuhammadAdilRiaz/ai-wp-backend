@@ -8,6 +8,7 @@ const authRoutes = require('./routes/auth');
 const chatRoutes = require('./routes/chat');
 const siteRoutes = require('./routes/sites');
 const creditRoutes = require('./routes/credits');
+const plansRoutes = require('./routes/plans');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -39,6 +40,7 @@ app.use('/api/auth',    authRoutes);
 app.use('/api/chat',    chatRoutes);
 app.use('/api/sites',   siteRoutes);
 app.use('/api/credits', creditRoutes);
+app.use('/api/plans', plansRoutes);
 
 // ── Health check (Railway uses this to confirm app is running) ────────────────
 app.get('/health', (req, res) => {

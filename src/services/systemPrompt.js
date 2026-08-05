@@ -1,16 +1,9 @@
-const Anthropic = require('@anthropic-ai/sdk');
-const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-
-const Anthropic = require('@anthropic-ai/sdk');
-const { buildSystemPrompt } = require('./systemPrompt');
-const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 // ─────────────────────────────────────────────────────────────────────────────
-// SYSTEM PROMPT — this tells Claude exactly how to behave
+// SYSTEM PROMPT — this tells the AI exactly how to behave
 // It must respond with valid JSON actions our WP plugin understands
+// Shared between Claude and GPT so both providers behave identically
 // ─────────────────────────────────────────────────────────────────────────────
-/*function buildSystemPrompt(wpContext) {
+function buildSystemPrompt(wpContext) {
     const contextStr = wpContext
         ? `\n\nCURRENT SITE STATE:\n${JSON.stringify(wpContext, null, 2)}`
         : '';
@@ -141,41 +134,6 @@ RULES:
 - If the user asks a question without requesting an action, set "actions": [] and just reply in "message"
 - Never make up page IDs — only use IDs from the CURRENT SITE STATE provided
 - Keep responses as valid JSON only — no extra text outside the JSON${contextStr}`;
-}*/
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main chat function — sends messages to Claude and returns structured response
-// history: array of { role: 'user'|'assistant', content: string }
-// ─────────────────────────────────────────────────────────────────────────────
-async function chatWithClaude(history, wpContext) {
-    const systemPrompt = buildSystemPrompt(wpContext);
-
-    const response = await client.messages.create({
-        model:      'claude-sonnet-5',
-        max_tokens: 4000,
-        system:     systemPrompt,
-        messages:   history,
-    });
-
-    const rawText = response.content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('');
-
-    // Parse the JSON response from Claude
-    try {
-        // Strip markdown code fences if Claude accidentally adds them
-        const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        const parsed  = JSON.parse(cleaned);
-        return { success: true, parsed, raw: rawText };
-    } catch (err) {
-        // If Claude returns plain text (for questions), wrap it
-        return {
-            success: true,
-            parsed: { message: rawText, actions: [], done: true },
-            raw: rawText,
-        };
-    }
 }
 
-module.exports = { chatWithClaude };
+module.exports = { buildSystemPrompt };
