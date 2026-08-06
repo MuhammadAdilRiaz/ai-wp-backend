@@ -1,8 +1,4 @@
 const Anthropic = require('@anthropic-ai/sdk');
-const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-
-const Anthropic = require('@anthropic-ai/sdk');
 const { buildSystemPrompt } = require('./systemPrompt');
 const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
