@@ -12,7 +12,7 @@ async function chatWithGPT(history, wpContext) {
 
     const response = await client.chat.completions.create({
         model:       'gpt-4.1',
-        max_tokens:  4000,
+        max_tokens:  8000,
         messages: [
             { role: 'system', content: systemPrompt },
             ...history,

@@ -7,15 +7,37 @@ const { selectProvider }        = require('../services/modelRouter');
 const { sendActionToWordPress, getWordPressContext } = require('../services/wordpress');
 const router       = express.Router();
 
-// Cost per chat message in credits
-const CREDITS_PER_MESSAGE = 5;
+// Minimum credits required just to send a message — real cost is calculated
+// AFTER we know what actions the AI decided to run (see calculateCreditsForActions)
+const MIN_CREDITS_TO_START = 2;
+
+// How many credits a message costs, based on what it actually did
+function calculateCreditsForActions(actionsToRun) {
+    if (actionsToRun.length === 0) return 2;                                        // just a question, no site changes
+    if (actionsToRun.some(a => a.action === 'create_elementor_page')) return 8;      // full page build — heaviest
+    return 5;                                                                        // normal edit/update
+}
+
+// Rough $ cost per request, from real token usage — used only for our own
+// internal logging/dashboard, never shown to the user or charged directly
+const RATES = {
+    claude:  { input: 2 / 1_000_000, output: 10 / 1_000_000 },   // Claude Sonnet 5
+    chatgpt: { input: 2 / 1_000_000, output: 8 / 1_000_000 },    // GPT-4.1
+};
+
+function estimateCost(provider, usage) {
+    const rate = RATES[provider];
+    if (!rate || !usage) return 0;
+    const cost = (usage.input_tokens || 0) * rate.input + (usage.output_tokens || 0) * rate.output;
+    return Number(cost.toFixed(6));
+}
 
 router.use(requireAuth);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/chat/message
-// Body: { site_id, message, history }
-// This is the main endpoint — user sends a message, Claude responds, WP gets updated
+// Body: { site_id, message, history, session_id }
+// This is the main endpoint — user sends a message, AI responds, WP gets updated
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/message', async (req, res) => {
     const { site_id, message, history = [], session_id } = req.body;
@@ -24,18 +46,18 @@ router.post('/message', async (req, res) => {
         return res.status(400).json({ error: 'message and site_id are required.' });
     }
 
-    // ── 1. Check user has enough credits ─────────────────────────────────────
+    // ── 1. Check user has at least the minimum credits to attempt a message ───
     const { data: profile } = await supabase
         .from('profiles')
         .select('credits, plan')
         .eq('id', req.user.id)
         .single();
 
-    if (!profile || profile.credits < CREDITS_PER_MESSAGE) {
+    if (!profile || profile.credits < MIN_CREDITS_TO_START) {
         return res.status(402).json({
             error:    'Not enough credits.',
             credits:  profile?.credits || 0,
-            required: CREDITS_PER_MESSAGE,
+            required: MIN_CREDITS_TO_START,
             upgrade:  true, // frontend shows upgrade modal when this is true
         });
     }
@@ -80,12 +102,16 @@ router.post('/message', async (req, res) => {
             .eq('user_id', req.user.id);
     }
 
-    // ── 3. Get current WordPress site context for Claude ─────────────────────
+    // ── 3. Get current WordPress site context for the AI ──────────────────────
     const wpContext = await getWordPressContext(site.site_url, site.site_token);
 
-    // ── 4. Build conversation history for Claude ──────────────────────────────
+    // ── 4. Build conversation history — only send the last N messages ─────────
+    // Keeps input tokens (and cost) bounded no matter how long the chat gets
+    const MAX_HISTORY_MESSAGES = 12;
+    const trimmedHistory = history.slice(-MAX_HISTORY_MESSAGES);
+
     const messages = [
-        ...history,
+        ...trimmedHistory,
         { role: 'user', content: message },
     ];
 
@@ -102,7 +128,7 @@ router.post('/message', async (req, res) => {
         return res.status(500).json({ error: 'AI is temporarily unavailable. Please try again.' });
     }
 
-    const { parsed } = aiResult;
+    const { parsed, usage } = aiResult;
     const actionsToRun = parsed.actions || [];
     const actionResults = [];
 
@@ -118,18 +144,29 @@ router.post('/message', async (req, res) => {
         }
     }
 
-    // ── 7. Deduct credits ─────────────────────────────────────────────────────
+    // ── 7. Work out the real credit cost for THIS message, then deduct ────────
+    const creditsToCharge = calculateCreditsForActions(actionsToRun);
+    const estimatedCost   = estimateCost(provider, usage);
+
     await supabase.rpc('deduct_credits', {
         p_user_id: req.user.id,
-        p_amount:  CREDITS_PER_MESSAGE,
+        p_amount:  creditsToCharge,
     });
 
-    // Log the transaction
+    // Log the transaction — metadata carries real token usage + cost so we can
+    // review actual margins later instead of relying on estimates
     await supabase.from('credit_transactions').insert({
         user_id:     req.user.id,
-        amount:      -CREDITS_PER_MESSAGE,
+        amount:      -creditsToCharge,
         type:        'usage',
         description: `Chat message — ${actionsToRun.length} action(s)`,
+        metadata: {
+            provider,
+            input_tokens:  usage?.input_tokens  || 0,
+            output_tokens: usage?.output_tokens || 0,
+            estimated_cost: estimatedCost,
+            session_id: activeSessionId,
+        },
         created_at:  new Date().toISOString(),
     });
 
@@ -166,7 +203,7 @@ router.post('/message', async (req, res) => {
         message:        parsed.message,
         actions:        actionsToRun,
         action_results: actionResults,
-        credits_used:   CREDITS_PER_MESSAGE,
+        credits_used:   creditsToCharge,
         credits_left:   updatedProfile?.credits || 0,
         provider,
         session_id: activeSessionId,

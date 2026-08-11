@@ -148,8 +148,14 @@ async function chatWithClaude(history, wpContext) {
 
     const response = await client.messages.create({
         model:      'claude-sonnet-5',
-        max_tokens: 4000,
-        system:     systemPrompt,
+        max_tokens: 8000,
+         system: [
+        {
+            type: "text",
+            text: systemPrompt,
+            cache_control: { type: "ephemeral" }
+        }
+    ],
         messages:   history,
     });
 
