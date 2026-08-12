@@ -1,5 +1,6 @@
 const express      = require('express');
 const supabase     = require('../lib/supabase');
+const { getSettings } = require('../lib/settings');
 const { requireAuth }           = require('../middleware/auth');
 const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
@@ -9,13 +10,19 @@ const router       = express.Router();
 
 // Minimum credits required just to send a message — real cost is calculated
 // AFTER we know what actions the AI decided to run (see calculateCreditsForActions)
-const MIN_CREDITS_TO_START = 2;
+/*const MIN_CREDITS_TO_START = 2;
 
-// How many credits a message costs, based on what it actually did
 function calculateCreditsForActions(actionsToRun) {
     if (actionsToRun.length === 0) return 2;                                        // just a question, no site changes
     if (actionsToRun.some(a => a.action === 'create_elementor_page')) return 8;      // full page build — heaviest
     return 5;                                                                        // normal edit/update
+}*/
+
+async function calculateCreditsForActions(actionsToRun) {
+    const s = await getSettings();
+    if (actionsToRun.length === 0) return s.credits_no_action ?? 2;
+    if (actionsToRun.some(a => a.action === 'create_elementor_page')) return s.credits_page_build ?? 8;
+    return s.credits_simple_action ?? 5;
 }
 
 // Rough $ cost per request, from real token usage — used only for our own
@@ -116,7 +123,7 @@ router.post('/message', async (req, res) => {
     ];
 
     // ── 5. Decide which AI provider to use, then ask it what to do ────────────
-    const provider = selectProvider(profile);
+    const provider = await selectProvider(profile);
 
     let aiResult;
     try {
@@ -145,7 +152,7 @@ router.post('/message', async (req, res) => {
     }
 
     // ── 7. Work out the real credit cost for THIS message, then deduct ────────
-    const creditsToCharge = calculateCreditsForActions(actionsToRun);
+    const creditsToCharge = await calculateCreditsForActions(actionsToRun);
     const estimatedCost   = estimateCost(provider, usage);
 
     await supabase.rpc('deduct_credits', {
