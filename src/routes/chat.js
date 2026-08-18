@@ -1,6 +1,6 @@
 const express      = require('express');
 const supabase     = require('../lib/supabase');
-const { getSettings } = require('../lib/settings');
+const { getSettings } = require('../lib/setting');
 const { requireAuth }           = require('../middleware/auth');
 const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
@@ -158,7 +158,7 @@ router.post('/message', async (req, res) => {
     await supabase.rpc('deduct_credits', {
         p_user_id: req.user.id,
         p_amount:  creditsToCharge,
-        ///
+        
     });
 
     // Log the transaction — metadata carries real token usage + cost so we can

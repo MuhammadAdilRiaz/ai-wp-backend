@@ -59,6 +59,6 @@ app.use((err, req, res, next) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0' , () => {
     console.log(`AI WP Builder backend running on port ${PORT}`);
 });

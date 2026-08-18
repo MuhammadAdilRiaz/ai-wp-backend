@@ -1,4 +1,4 @@
-const { getSettings } = require('../lib/settings');
+const { getSettings } = require('../lib/setting');
 
 async function selectProvider(profile) {
     if (profile.plan === 'business') return 'claude';
