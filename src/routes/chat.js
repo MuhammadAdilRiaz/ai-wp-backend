@@ -158,6 +158,7 @@ router.post('/message', async (req, res) => {
     await supabase.rpc('deduct_credits', {
         p_user_id: req.user.id,
         p_amount:  creditsToCharge,
+        ///
     });
 
     // Log the transaction — metadata carries real token usage + cost so we can
