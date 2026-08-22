@@ -143,11 +143,16 @@ RULES:
 // Main chat function — sends messages to Claude and returns structured response
 // history: array of { role: 'user'|'assistant', content: string }
 // ─────────────────────────────────────────────────────────────────────────────
-async function chatWithClaude(history, wpContext) {
+const MODEL_IDS = {
+    sonnet: 'claude-sonnet-5',
+    opus:   'claude-opus-5', // business/enterprise heavy builds
+};
+
+async function chatWithClaude(history, wpContext, tier = 'sonnet') {
     const systemPrompt = buildSystemPrompt(wpContext);
 
     const response = await client.messages.create({
-        model:      'claude-sonnet-5',
+        model:      MODEL_IDS[tier] || MODEL_IDS.sonnet,
         max_tokens: 8000,
          system: [
         {

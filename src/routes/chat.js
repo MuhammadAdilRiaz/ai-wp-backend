@@ -9,35 +9,44 @@ const { sendActionToWordPress, getWordPressContext } = require('../services/word
 const router       = express.Router();
 
 // Minimum credits required just to send a message — real cost is calculated
-// AFTER we know what actions the AI decided to run (see calculateCreditsForActions)
-/*const MIN_CREDITS_TO_START = 2;
+// AFTER we know actual token usage from the AI response (see creditsFromCost)
+const MIN_CREDITS_TO_START = 2;
+const TRIAL_DAILY_MESSAGE_CAP = 15; // spreads the 30-credit trial allotment over the week, blunts scripted bursts
 
-function calculateCreditsForActions(actionsToRun) {
-    if (actionsToRun.length === 0) return 2;                                        // just a question, no site changes
-    if (actionsToRun.some(a => a.action === 'create_elementor_page')) return 8;      // full page build — heaviest
-    return 5;                                                                        // normal edit/update
-}*/
-
-async function calculateCreditsForActions(actionsToRun) {
-    const s = await getSettings();
-    if (actionsToRun.length === 0) return s.credits_no_action ?? 2;
-    if (actionsToRun.some(a => a.action === 'create_elementor_page')) return s.credits_page_build ?? 8;
-    return s.credits_simple_action ?? 5;
-}
-
-// Rough $ cost per request, from real token usage — used only for our own
-// internal logging/dashboard, never shown to the user or charged directly
+// Real $ cost per request, from actual token usage returned by the provider.
+// This drives BOTH internal margin tracking AND what we charge the user —
+// see creditsFromCost() below. Keep in sync with your provider dashboards.
 const RATES = {
-    claude:  { input: 2 / 1_000_000, output: 10 / 1_000_000 },   // Claude Sonnet 5
-    chatgpt: { input: 2 / 1_000_000, output: 8 / 1_000_000 },    // GPT-4.1
+    claude: {
+        sonnet: { input: 2 / 1_000_000, output: 10 / 1_000_000 }, // Claude Sonnet 5
+        opus:   { input: 5 / 1_000_000, output: 25 / 1_000_000 }, // Claude Opus 5
+    },
+    chatgpt: {
+        luna: { input: 0.20 / 1_000_000, output: 1.20 / 1_000_000 }, // GPT-5.6 Luna
+    },
 };
 
-function estimateCost(provider, usage) {
-    const rate = RATES[provider];
+function estimateCost(provider, model, usage) {
+    const rate = RATES[provider]?.[model];
     if (!rate || !usage) return 0;
     const cost = (usage.input_tokens || 0) * rate.input + (usage.output_tokens || 0) * rate.output;
     return Number(cost.toFixed(6));
 }
+
+// Convert a real $ cost into REAL backend credits. usd_per_real_credit is a
+// SIZING unit ("$0.005 of raw cost = 1 real credit"), not a price — margin
+// comes from how many credits each plan grants for its price, not from this
+// number (see src/lib/plans.js, which is where the actual margin math lives).
+// Always charge at least the floor, even on a $0 message, so a burst of
+// trivial questions can't drain a user's monthly allotment for nothing.
+async function creditsFromCost(costUsd) {
+    const s = await getSettings();
+    const usdPerRealCredit = s.usd_per_real_credit ?? 0.005;
+    const floor = s.min_real_credits_per_message ?? 1;
+    return Math.max(floor, Math.ceil(costUsd / usdPerRealCredit));
+}
+
+const { toDisplay } = require('../lib/credits');
 
 router.use(requireAuth);
 
@@ -47,24 +56,52 @@ router.use(requireAuth);
 // This is the main endpoint — user sends a message, AI responds, WP gets updated
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/message', async (req, res) => {
-    const { site_id, message, history = [], session_id } = req.body;
+    const { site_id, message, history = [], session_id, has_attachment = false } = req.body;
 
     if (!message || !site_id) {
         return res.status(400).json({ error: 'message and site_id are required.' });
     }
 
     // ── 1. Check user has at least the minimum credits to attempt a message ───
+    // profile.credits is REAL credits (internal). Compare against the real floor.
     const { data: profile } = await supabase
         .from('profiles')
-        .select('credits, plan')
+        .select('credits, plan, trial_ends_at')
         .eq('id', req.user.id)
         .single();
+
+    if (profile?.plan === 'trial' && profile.trial_ends_at && new Date(profile.trial_ends_at) < new Date()) {
+        return res.status(402).json({
+            error:   'Your trial has ended. Pick a plan to keep building.',
+            upgrade: true,
+        });
+    }
+
+    // Trial-only: cap messages per rolling 24h, separate from the lifetime
+    // 30-credit cap. Slows down a scripted burst even on a legitimate trial
+    // account — a real person testing the tool won't hit this.
+    if (profile?.plan === 'trial') {
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { count } = await supabase
+            .from('credit_transactions')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', req.user.id)
+            .eq('type', 'usage')
+            .gte('created_at', since);
+
+        if ((count || 0) >= TRIAL_DAILY_MESSAGE_CAP) {
+            return res.status(429).json({
+                error: `Trial is limited to ${TRIAL_DAILY_MESSAGE_CAP} messages per day. Come back tomorrow, or pick a plan.`,
+                upgrade: true,
+            });
+        }
+    }
 
     if (!profile || profile.credits < MIN_CREDITS_TO_START) {
         return res.status(402).json({
             error:    'Not enough credits.',
-            credits:  profile?.credits || 0,
-            required: MIN_CREDITS_TO_START,
+            credits:  toDisplay(profile?.credits || 0),
+            required: toDisplay(MIN_CREDITS_TO_START),
             upgrade:  true, // frontend shows upgrade modal when this is true
         });
     }
@@ -123,15 +160,15 @@ router.post('/message', async (req, res) => {
     ];
 
     // ── 5. Decide which AI provider to use, then ask it what to do ────────────
-    const provider = await selectProvider(profile);
+    const { provider, model } = await selectProvider(profile, { hasAttachment: !!has_attachment, message });
 
     let aiResult;
     try {
         aiResult = provider === 'claude'
-            ? await chatWithClaude(messages, wpContext)
-            : await chatWithGPT(messages, wpContext);
+            ? await chatWithClaude(messages, wpContext, model)   // model: 'sonnet' | 'opus'
+            : await chatWithGPT(messages, wpContext);            // always 'luna' today
     } catch (err) {
-        console.error(`${provider} API error:`, err);
+        console.error(`${provider} (${model}) API error:`, err);
         return res.status(500).json({ error: 'AI is temporarily unavailable. Please try again.' });
     }
 
@@ -152,8 +189,11 @@ router.post('/message', async (req, res) => {
     }
 
     // ── 7. Work out the real credit cost for THIS message, then deduct ────────
-    const creditsToCharge = await calculateCreditsForActions(actionsToRun);
-    const estimatedCost   = estimateCost(provider, usage);
+    // Charged from ACTUAL token usage × the model actually used, not a flat
+    // per-action guess — a Claude heavy build and a Luna one-liner should not
+    // cost the same number of credits.
+    const estimatedCost   = estimateCost(provider, model, usage);
+    const creditsToCharge = await creditsFromCost(estimatedCost); // REAL credits
 
     await supabase.rpc('deduct_credits', {
         p_user_id: req.user.id,
@@ -170,6 +210,7 @@ router.post('/message', async (req, res) => {
         description: `Chat message — ${actionsToRun.length} action(s)`,
         metadata: {
             provider,
+            model,
             input_tokens:  usage?.input_tokens  || 0,
             output_tokens: usage?.output_tokens || 0,
             estimated_cost: estimatedCost,
@@ -211,8 +252,8 @@ router.post('/message', async (req, res) => {
         message:        parsed.message,
         actions:        actionsToRun,
         action_results: actionResults,
-        credits_used:   creditsToCharge,
-        credits_left:   updatedProfile?.credits || 0,
+        credits_used:   toDisplay(creditsToCharge),
+        credits_left:   toDisplay(updatedProfile?.credits || 0),
         provider,
         session_id: activeSessionId,
     });

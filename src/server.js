@@ -8,7 +8,12 @@ const authRoutes = require('./routes/auth');
 const chatRoutes = require('./routes/chat');
 const siteRoutes = require('./routes/sites');
 const creditRoutes = require('./routes/credits');
-const plansRoutes = require('./routes/plans');
+// plansRoutes is NOT wired below — it queries a `plans` table and a
+// `plan_credit_tiers_display` view that don't exist in supabase-schema.sql,
+// so every call 500s. /api/credits/packages does the same job (buyable
+// credit packs) and is actually backed by the schema. Build out the
+// plans/tiers tables properly before re-enabling this route.
+// const plansRoutes = require('./routes/plans');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -40,7 +45,6 @@ app.use('/api/auth',    authRoutes);
 app.use('/api/chat',    chatRoutes);
 app.use('/api/sites',   siteRoutes);
 app.use('/api/credits', creditRoutes);
-app.use('/api/plans', plansRoutes);
 
 // ── Health check (Railway uses this to confirm app is running) ────────────────
 app.get('/health', (req, res) => {

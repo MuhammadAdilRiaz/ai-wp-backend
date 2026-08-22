@@ -11,7 +11,7 @@ async function chatWithGPT(history, wpContext) {
     const systemPrompt = buildSystemPrompt(wpContext);
 
     const response = await client.chat.completions.create({
-        model:       'gpt-4.1',
+        model:       'gpt-5.6-luna', // cheap/high-volume tier — matches the "simple prompt, no file" package
         max_tokens:  8000,
         messages: [
             { role: 'system', content: systemPrompt },

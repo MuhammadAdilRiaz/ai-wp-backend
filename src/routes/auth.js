@@ -1,11 +1,23 @@
 const express  = require('express');
+const rateLimit = require('express-rate-limit');
 const supabase = require('../lib/supabase');
+const { TRIAL } = require('../lib/plans');
 const router   = express.Router();
 
-const FREE_CREDITS = parseInt(process.env.FREE_CREDITS) || 100;
+// Scripted mass trial signups are the real cost risk, not organic trial
+// usage (worst case there is bounded — see TRIAL.real_credits). 5 signups/hr
+// per IP is generous for a real person, tight for a bot loop.
+const signupLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    message: { error: 'Too many signup attempts from this address. Try again later.' },
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: create user profile + give free credits on first signup
+// Helper: create user profile + start their 7-day trial on first signup.
+// No free tier — every account starts on `trial` and must pick a paid plan
+// (starter/pro/business) before or when the trial runs out (enforced in
+// chat.js, not here).
 // ─────────────────────────────────────────────────────────────────────────────
 async function createUserProfile(userId, email) {
     // Check if profile already exists (avoid duplicates)
@@ -17,21 +29,24 @@ async function createUserProfile(userId, email) {
 
     if (existing) return; // already set up
 
+    const trialEndsAt = new Date(Date.now() + TRIAL.days * 24 * 60 * 60 * 1000).toISOString();
+
     // Create profile row
     await supabase.from('profiles').insert({
-        id:         userId,
-        email:      email,
-        credits:    FREE_CREDITS,
-        plan:       'free',
-        created_at: new Date().toISOString(),
+        id:             userId,
+        email:          email,
+        credits:        TRIAL.real_credits,
+        plan:           'trial',
+        trial_ends_at:  trialEndsAt,
+        created_at:     new Date().toISOString(),
     });
 
-    // Log the free credit grant
+    // Log the trial credit grant
     await supabase.from('credit_transactions').insert({
         user_id:     userId,
-        amount:      FREE_CREDITS,
+        amount:      TRIAL.real_credits,
         type:        'grant',
-        description: 'Welcome gift — free credits',
+        description: `${TRIAL.days}-day trial credits`,
         created_at:  new Date().toISOString(),
     });
 }
@@ -40,7 +55,7 @@ async function createUserProfile(userId, email) {
 // POST /api/auth/signup
 // Body: { email, password }
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/signup', async (req, res) => {
+router.post('/signup', signupLimiter, async (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -68,7 +83,8 @@ router.post('/signup', async (req, res) => {
     res.json({
         user:    session.user,
         session: session.session,
-        credits: FREE_CREDITS,
+        credits: TRIAL.display_credits,
+        trial_days: TRIAL.days,
     });
 });
 
