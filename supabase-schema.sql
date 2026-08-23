@@ -7,12 +7,21 @@
 create table if not exists profiles (
     id             uuid primary key references auth.users(id) on delete cascade,
     email          text not null,
-    credits        integer not null default 0,     -- REAL credits; granted by auth.js (trial) or your billing webhook (paid plans)
-    plan           text not null default 'trial',  -- trial | starter | pro | business
+    name           text,                            -- optional display name, set via PATCH /api/auth/me
+    credits        integer not null default 0,     -- REAL credits; granted by auth.js (trial) or the Stripe webhook (paid plans)
+    plan           text not null default 'trial',  -- trial | starter | pro | business | cancelled
     trial_ends_at  timestamptz,                     -- set at signup; see src/lib/plans.js TRIAL.days
-    billing_cycle  text default 'monthly',          -- monthly | yearly — set when they pick a paid plan
+    trial_reminder_sent boolean default false,      -- set by src/lib/cron.js once the trial-ending email has gone out
+    billing_cycle  text default 'monthly',          -- monthly | yearly — set by the Stripe webhook when they subscribe
+    billing_status text default 'trialing',         -- trialing | active | past_due | cancelled — mirrors Stripe, set only by src/routes/webhooks.js
+    stripe_customer_id     text,
+    stripe_subscription_id text,
+    low_credit_notified    boolean default false,   -- resets to false on every renewal (webhooks.js) so the nudge can fire again next cycle
     created_at     timestamptz default now()
 );
+
+create unique index if not exists idx_profiles_stripe_customer on profiles(stripe_customer_id) where stripe_customer_id is not null;
+create unique index if not exists idx_profiles_stripe_subscription on profiles(stripe_subscription_id) where stripe_subscription_id is not null;
 
 -- 2. SITES — connected WordPress sites
 create table if not exists sites (
@@ -78,6 +87,12 @@ create table if not exists app_settings (
 -- profiles table (credits default 100, plan default 'free'), run these too:
 alter table profiles add column if not exists trial_ends_at timestamptz;
 alter table profiles add column if not exists billing_cycle text default 'monthly';
+alter table profiles add column if not exists trial_reminder_sent boolean default false;
+alter table profiles add column if not exists billing_status text default 'trialing';
+alter table profiles add column if not exists stripe_customer_id text;
+alter table profiles add column if not exists stripe_subscription_id text;
+alter table profiles add column if not exists low_credit_notified boolean default false;
+alter table profiles add column if not exists name text;
 
 insert into app_settings (key, value) values
     ('usd_per_real_credit',        '0.005'),  -- SIZING unit ($ raw cost = 1 real credit), not a price — margin lives in src/lib/plans.js
