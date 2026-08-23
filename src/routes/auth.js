@@ -174,11 +174,46 @@ router.get('/me', async (req, res) => {
 
     const { data: profile } = await supabase
         .from('profiles')
-        .select('credits, plan, created_at')
+        .select('name, credits, plan, created_at')
         .eq('id', user.id)
         .single();
 
     res.json({ user, profile });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/auth/me — update your own display name
+// (the only editable profile field for now — email changes go through
+// Supabase auth directly, not this table, since it's also the login credential)
+// ─────────────────────────────────────────────────────────────────────────────
+router.patch('/me', async (req, res) => {
+    const token = (req.headers.authorization || '').replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'Not logged in.' });
+
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ error: 'Invalid session.' });
+
+    const { name } = req.body;
+    if (typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({ error: 'name is required.' });
+    }
+    if (name.trim().length > 80) {
+        return res.status(400).json({ error: 'name must be 80 characters or fewer.' });
+    }
+
+    const { data: profile, error: updateError } = await supabase
+        .from('profiles')
+        .update({ name: name.trim() })
+        .eq('id', user.id)
+        .select('name, credits, plan, created_at')
+        .single();
+
+    if (updateError) {
+        console.error('Profile name update failed:', updateError);
+        return res.status(500).json({ error: 'Could not update name.' });
+    }
+
+    res.json({ profile });
 });
 
 module.exports = router;
