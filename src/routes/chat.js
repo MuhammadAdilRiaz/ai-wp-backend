@@ -6,12 +6,15 @@ const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
 const { selectProvider }        = require('../services/modelRouter');
 const { sendActionToWordPress, getWordPressContext } = require('../services/wordpress');
+const { getPlan } = require('../lib/plans');
+const { sendLowCreditEmail } = require('../lib/email');
 const router       = express.Router();
 
 // Minimum credits required just to send a message — real cost is calculated
 // AFTER we know actual token usage from the AI response (see creditsFromCost)
 const MIN_CREDITS_TO_START = 2;
 const TRIAL_DAILY_MESSAGE_CAP = 15; // spreads the 30-credit trial allotment over the week, blunts scripted bursts
+const LOW_CREDIT_THRESHOLD = 0.20; // nudge email fires once a paid user drops to 20% of their monthly allotment
 
 // Real $ cost per request, from actual token usage returned by the provider.
 // This drives BOTH internal margin tracking AND what we charge the user —
@@ -69,6 +72,13 @@ router.post('/message', async (req, res) => {
         .select('credits, plan, trial_ends_at')
         .eq('id', req.user.id)
         .single();
+
+    if (profile?.plan === 'cancelled') {
+        return res.status(402).json({
+            error:   'Your subscription has ended. Resubscribe to keep building.',
+            upgrade: true,
+        });
+    }
 
     if (profile?.plan === 'trial' && profile.trial_ends_at && new Date(profile.trial_ends_at) < new Date()) {
         return res.status(402).json({
@@ -243,9 +253,23 @@ router.post('/message', async (req, res) => {
     // ── 9. Get updated credit balance ─────────────────────────────────────────
     const { data: updatedProfile } = await supabase
         .from('profiles')
-        .select('credits')
+        .select('credits, plan, low_credit_notified')
         .eq('id', req.user.id)
         .single();
+
+    // ── 9b. Low-credit upsell nudge — once per billing cycle, paid plans only ──
+    // Trial users don't get this (they're not going to "upgrade mid-nudge",
+    // they either convert or don't). low_credit_notified resets to false on
+    // every renewal (see webhooks.js), so this fires again next cycle if
+    // they're still running low.
+    const planConfig = getPlan(updatedProfile?.plan);
+    if (planConfig && updatedProfile && !updatedProfile.low_credit_notified) {
+        const remainingPct = updatedProfile.credits / planConfig.real_credits_monthly;
+        if (remainingPct <= LOW_CREDIT_THRESHOLD) {
+            await sendLowCreditEmail(req.user.email, planConfig.label);
+            await supabase.from('profiles').update({ low_credit_notified: true }).eq('id', req.user.id);
+        }
+    }
 
     // ── 10. Return everything to the frontend ─────────────────────────────────
     res.json({

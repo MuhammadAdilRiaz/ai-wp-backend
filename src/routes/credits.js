@@ -17,7 +17,7 @@ router.use(requireAuth);
 router.get('/', async (req, res) => {
     const { data: profile } = await supabase
         .from('profiles')
-        .select('credits, plan, trial_ends_at, billing_cycle')
+        .select('credits, plan, trial_ends_at, billing_cycle, billing_status')
         .eq('id', req.user.id)
         .single();
 
@@ -36,6 +36,7 @@ router.get('/', async (req, res) => {
         credits:        toDisplay(profile?.credits || 0),
         plan:           profile?.plan || 'trial',
         billing_cycle:  profile?.billing_cycle || 'monthly',
+        billing_status: profile?.billing_status || 'trialing',
         trial_ends_at:  profile?.trial_ends_at || null,
         trial_expired:  trialExpired,
         history: (history || []).map(h => ({ ...h, amount: toDisplay(h.amount) })),
