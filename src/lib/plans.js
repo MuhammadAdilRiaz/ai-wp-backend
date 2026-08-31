@@ -61,4 +61,28 @@ function getPlan(planId) {
     return PAID_PLANS[planId] || null;
 }
 
-module.exports = { TRIAL, PAID_PLANS, annualPrice, getPlan, ANNUAL_MONTHLY_DISCOUNT };
+// Maps plan + billing cycle -> the Stripe Price ID you created in the
+// dashboard. Read lazily (not at module load) so it always reflects
+// whatever's currently in process.env, including in tests.
+function stripePriceId(planId, cycle) {
+    const key = `STRIPE_PRICE_${planId.toUpperCase()}_${cycle.toUpperCase()}`;
+    return process.env[key] || null;
+}
+
+// Reverse lookup — given a Stripe Price ID from a webhook payload, figure
+// out which plan + cycle it corresponds to. O(1) plans, fine to scan.
+function planFromStripePriceId(priceId) {
+    for (const planId of Object.keys(PAID_PLANS)) {
+        for (const cycle of ['monthly', 'yearly']) {
+            if (stripePriceId(planId, cycle) === priceId) {
+                return { planId, cycle };
+            }
+        }
+    }
+    return null;
+}
+
+module.exports = {
+    TRIAL, PAID_PLANS, annualPrice, getPlan, ANNUAL_MONTHLY_DISCOUNT,
+    stripePriceId, planFromStripePriceId,
+};
