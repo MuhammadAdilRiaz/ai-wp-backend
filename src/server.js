@@ -21,6 +21,8 @@ const { startCronJobs } = require('./lib/cron');
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
+app.disable('etag');
+
 // ── Security headers ──────────────────────────────────────────────────────────
 app.use(helmet());
 
