@@ -5,8 +5,6 @@ const { toDisplay } = require('../lib/credits');
 const { TRIAL, PAID_PLANS, annualPrice } = require('../lib/plans');
 const router       = express.Router();
 
-router.use(requireAuth);
-
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/credits — current balance + trial/plan status + history.
 // Everything numeric returned here is in DISPLAY credits (10x real).
@@ -14,7 +12,7 @@ router.use(requireAuth);
 // trial grant (given at signup, see auth.js) and monthly plan renewals
 // (handled by your billing webhook, not this route).
 // ─────────────────────────────────────────────────────────────────────────────
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
     const { data: profile } = await supabase
         .from('profiles')
         .select('credits, plan, trial_ends_at, billing_cycle, billing_status')
