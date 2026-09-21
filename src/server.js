@@ -27,11 +27,38 @@ app.disable('etag');
 app.use(helmet());
 
 // ── CORS: only allow your frontend ───────────────────────────────────────────
+// FRONTEND_URL names ONE origin, but a site is normally reachable at both the
+// apex and the www host. Listing only one meant the other loaded the page and
+// then failed every API call on CORS -- a confusing "the site is up but nothing
+// works" failure. Accept both spellings of the configured host instead.
+function allowedOrigins() {
+    const list = ['http://localhost:3000'];
+    const configured = process.env.FRONTEND_URL;
+    if (!configured) return list;
+
+    list.push(configured);
+    try {
+        const { protocol, host } = new URL(configured);
+        const sibling = host.startsWith('www.')
+            ? host.slice(4)          // www.example.com -> example.com
+            : `www.${host}`;         // example.com     -> www.example.com
+        list.push(`${protocol}//${sibling}`);
+    } catch {
+        // FRONTEND_URL isn't a parseable URL; the exact string above still works.
+    }
+    return list;
+}
+
+const ALLOWED_ORIGINS = allowedOrigins();
+
 app.use(cors({
-    origin: [
-        process.env.FRONTEND_URL,
-        'http://localhost:3000',  // for local dev
-    ],
+    origin: (origin, callback) => {
+        // No Origin header = a same-origin or non-browser caller (curl, health
+        // checks, the WordPress plugin). Those aren't subject to CORS.
+        if (!origin) return callback(null, true);
+        if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+        callback(new Error(`Origin ${origin} is not allowed by CORS.`));
+    },
     credentials: true,
 }));
 
