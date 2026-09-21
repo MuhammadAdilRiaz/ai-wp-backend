@@ -1,6 +1,18 @@
 const OpenAI = require('openai');
 const { buildSystemPrompt } = require('./systemPrompt');
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Built on first use, not at import time. The OpenAI SDK throws from its
+// constructor when OPENAI_API_KEY is missing, so a top-level `new OpenAI(...)`
+// takes the ENTIRE backend down on boot the moment that one env var is absent
+// — even for users who never touch the Luna tier. Lazy is the difference
+// between "GPT is unavailable" and "nothing works".
+let client = null;
+function getClient() {
+    if (!process.env.OPENAI_API_KEY) {
+        throw new Error('OPENAI_API_KEY is not configured on the server.');
+    }
+    if (!client) client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    return client;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main chat function — sends messages to GPT and returns structured response
@@ -10,7 +22,7 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 async function chatWithGPT(history, wpContext) {
     const systemPrompt = buildSystemPrompt(wpContext);
 
-    const response = await client.chat.completions.create({
+    const response = await getClient().chat.completions.create({
         model:       'gpt-5.6-luna', // cheap/high-volume tier — matches the "simple prompt, no file" package
         max_tokens:  8000,
         messages: [

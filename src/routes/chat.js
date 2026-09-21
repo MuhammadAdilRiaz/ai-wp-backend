@@ -304,10 +304,33 @@ router.get('/sessions', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/chat/history?session_id=xxx — load messages for ONE specific chat
+//
+// Also accepts ?site_id=xxx and resumes that site's most recent thread. The
+// chat page only ever knew the site id, so it was sending ?site_id= to a route
+// that demanded session_id — a 400 that the page's catch-all then turned into
+// "please log in". That mismatch is why a signed-in user got bounced.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/history', async (req, res) => {
-    const { session_id } = req.query;
-    if (!session_id) return res.status(400).json({ error: 'session_id is required.' });
+    let { session_id, site_id } = req.query;
+
+    if (!session_id && !site_id) {
+        return res.status(400).json({ error: 'session_id or site_id is required.' });
+    }
+
+    if (!session_id) {
+        const { data: latest } = await supabase
+            .from('chat_sessions')
+            .select('id')
+            .eq('user_id', req.user.id)
+            .eq('site_id', site_id)
+            .order('last_message_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        // No thread yet for this site is a normal empty state, not an error.
+        if (!latest) return res.json({ history: [], session_id: null });
+        session_id = latest.id;
+    }
 
     const { data } = await supabase
         .from('conversations')
@@ -317,7 +340,7 @@ router.get('/history', async (req, res) => {
         .order('created_at', { ascending: true })
         .limit(200);
 
-    res.json({ history: data || [] });
+    res.json({ history: data || [], session_id });
 });
 
 module.exports = router;

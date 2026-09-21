@@ -61,7 +61,7 @@ router.post('/connect', async (req, res) => {
 router.get('/', async (req, res) => {
     const { data, error } = await supabase
         .from('sites')
-        .select('id, site_url, site_name, elementor, connected, updated_at')
+        .select('id, site_url, site_name, elementor, connected, starred, updated_at')
         .eq('user_id', req.user.id)
         .order('updated_at', { ascending: false });
 
@@ -71,6 +71,31 @@ router.get('/', async (req, res) => {
     }
 
     res.json({ sites: data || [] });
+});
+
+// PATCH /api/sites/:id/star — ProjectsGrid and the Starred sidebar filter have
+// always called this; it was never implemented, so starring a project 404'd.
+router.patch('/:id/star', async (req, res) => {
+    const { starred } = req.body;
+    if (typeof starred !== 'boolean') {
+        return res.status(400).json({ error: 'starred must be true or false.' });
+    }
+
+    const { data, error } = await supabase
+        .from('sites')
+        .update({ starred })
+        .eq('id', req.params.id)
+        .eq('user_id', req.user.id)
+        .select('id, site_url, site_name, elementor, connected, starred, updated_at')
+        .maybeSingle();
+
+    if (error) {
+        console.error('Star site error:', error);
+        return res.status(500).json({ error: 'Failed to update project.' });
+    }
+    if (!data) return res.status(404).json({ error: 'Site not found.' });
+
+    res.json({ site: data });
 });
 
 // GET /api/sites/:id/context

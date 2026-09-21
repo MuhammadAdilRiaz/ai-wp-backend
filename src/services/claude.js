@@ -1,6 +1,15 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { buildSystemPrompt } = require('./systemPrompt');
-const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Lazy for the same reason as services/openai.js: a missing key should make
+// one provider unavailable, not crash the server at import time.
+let client = null;
+function getClient() {
+    if (!process.env.ANTHROPIC_API_KEY) {
+        throw new Error('ANTHROPIC_API_KEY is not configured on the server.');
+    }
+    if (!client) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    return client;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SYSTEM PROMPT — this tells Claude exactly how to behave
@@ -151,7 +160,7 @@ const MODEL_IDS = {
 async function chatWithClaude(history, wpContext, tier = 'sonnet') {
     const systemPrompt = buildSystemPrompt(wpContext);
 
-    const response = await client.messages.create({
+    const response = await getClient().messages.create({
         model:      MODEL_IDS[tier] || MODEL_IDS.sonnet,
         max_tokens: 8000,
          system: [
