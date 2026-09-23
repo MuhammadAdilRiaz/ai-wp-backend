@@ -261,7 +261,7 @@ router.get('/oauth-url', async (req, res) => {
     });
 
     if (error) return res.status(400).json({ error: error.message });
-    if (capturedVerifier) oauthStore.save(state, capturedVerifier);
+    if (capturedVerifier) await oauthStore.save(state, capturedVerifier);
 
     res.json({ url: data.url });
 });
@@ -276,7 +276,7 @@ router.post('/oauth-callback', async (req, res) => {
     // Look up the verifier saved for this exact login attempt. If `state` is
     // missing (e.g. an older frontend build) or already expired, fall back to
     // the shared client — works fine as long as logins aren't overlapping.
-    const verifier = state ? oauthStore.consume(state) : null;
+    const verifier = state ? await oauthStore.consume(state) : null;
 
     const exchangeClient = verifier
         ? makePkceClient({
