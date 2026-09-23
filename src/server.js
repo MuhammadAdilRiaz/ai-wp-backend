@@ -23,6 +23,15 @@ const PORT = process.env.PORT || 3001;
 
 app.disable('etag');
 
+// Render (like any PaaS) puts a proxy in front of us, so req.ip is the proxy's
+// address unless we trust the X-Forwarded-For header it sets. Without this,
+// express-rate-limit keys EVERY request off that one proxy IP -- meaning all
+// users share a single 60-requests-per-minute bucket and throttle each other.
+// It also logs ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on every request. `1` trusts
+// exactly one proxy hop, which is what Render puts in front of the service;
+// `true` would trust the whole chain and let a client spoof its own IP.
+app.set('trust proxy', 1);
+
 // ── Security headers ──────────────────────────────────────────────────────────
 app.use(helmet());
 
