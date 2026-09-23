@@ -31,8 +31,25 @@ function makeAuthClient() {
 // caused concurrent logins to clash — see lib/oauthStore.js).
 function makePkceClient(storage) {
     return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
-        auth: { flowType: 'pkce', storage, persistSession: false, autoRefreshToken: false },
+        // persistSession MUST be true. With it false, supabase-js still puts a
+        // code_challenge on the authorize URL but never writes the verifier to
+        // storage and never reads it back on exchange -- so every OAuth login
+        // failed and the user was bounced to /auth right after authenticating.
+        // `storage` is created per request, so nothing is shared between users.
+        auth: { flowType: 'pkce', storage, persistSession: true, autoRefreshToken: false },
     });
+}
+
+// A storage object backed by a Map, optionally seeded from a saved snapshot.
+// supabase-js only needs getItem/setItem/removeItem.
+function mapStorage(seed) {
+    const map = new Map(Object.entries(seed || {}));
+    return {
+        map,
+        getItem:    (key) => (map.has(key) ? map.get(key) : null),
+        setItem:    (key, value) => { map.set(key, value); },
+        removeItem: (key) => { map.delete(key); },
+    };
 }
 
 // Scripted mass trial signups are the real cost risk, not organic trial
@@ -246,22 +263,26 @@ router.get('/oauth-url', async (req, res) => {
     // After OAuth, redirect back to whichever frontend the request came from
     const redirectTo = `${baseUrl}/auth/callback?state=${state}&site_url=${encodeURIComponent(siteUrl)}&site_token=${encodeURIComponent(siteToken)}`;
 
-    // Capture the verifier this call generates instead of letting the shared
-    // client store it internally.
-    let capturedVerifier = null;
-    const capturingStorage = {
-        getItem: () => null,
-        setItem: (key, value) => { if (key.includes('code-verifier')) capturedVerifier = value; },
-        removeItem: () => {},
-    };
+    // Capture everything this call writes, rather than guessing which key holds
+    // the verifier -- see lib/oauthStore.js for why that guess was unsafe.
+    const capturing = mapStorage();
 
-    const { data, error } = await makePkceClient(capturingStorage).auth.signInWithOAuth({
+    const { data, error } = await makePkceClient(capturing).auth.signInWithOAuth({
         provider,
         options: { redirectTo, skipBrowserRedirect: true },
     });
 
     if (error) return res.status(400).json({ error: error.message });
-    if (capturedVerifier) await oauthStore.save(state, capturedVerifier);
+
+    if (capturing.map.size === 0) {
+        // The URL carries a code_challenge, so without the matching verifier
+        // the callback can only fail. Better to say so now than to send the
+        // user to the provider and bounce them straight back.
+        console.error('oauth-url: supabase-js wrote no PKCE state; cannot complete this login');
+        return res.status(500).json({ error: 'Could not start sign-in. Please try again.' });
+    }
+
+    await oauthStore.save(state, Object.fromEntries(capturing.map));
 
     res.json({ url: data.url });
 });
@@ -276,15 +297,20 @@ router.post('/oauth-callback', async (req, res) => {
     // Look up the verifier saved for this exact login attempt. If `state` is
     // missing (e.g. an older frontend build) or already expired, fall back to
     // the shared client — works fine as long as logins aren't overlapping.
-    const verifier = state ? await oauthStore.consume(state) : null;
+    const snapshot = state ? await oauthStore.consume(state) : null;
 
-    const exchangeClient = verifier
-        ? makePkceClient({
-            getItem: (key) => (key.includes('code-verifier') ? verifier : null),
-            setItem: () => {},
-            removeItem: () => {},
-        })
-        : supabase;
+    if (!snapshot) {
+        // Without the snapshot the PKCE exchange cannot succeed, and falling
+        // back to the shared client (as this used to) fails too -- that client
+        // never held a verifier. Say so plainly instead of surfacing a
+        // confusing provider error.
+        return res.status(400).json({
+            error: 'This sign-in link has expired. Please try signing in again.',
+            code:  'OAUTH_STATE_MISSING',
+        });
+    }
+
+    const exchangeClient = makePkceClient(mapStorage(snapshot));
 
     const { data, error } = await exchangeClient.auth.exchangeCodeForSession(code);
     if (error) return res.status(400).json({ error: error.message });
