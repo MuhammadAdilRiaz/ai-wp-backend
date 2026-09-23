@@ -235,11 +235,30 @@ router.post('/logout', async (req, res) => {
 // Returns the OAuth redirect URL — frontend opens this in a popup or redirect
 // ─────────────────────────────────────────────────────────────────────────────
 
-// List of frontend URLs allowed to receive the OAuth redirect
-const ALLOWED_FRONTEND_URLS = [
-    process.env.FRONTEND_URL,          // production, e.g. https://derbypetstore.com
-    'http://localhost:3000',           // local dev
-];
+// Frontend URLs allowed to receive the OAuth redirect.
+//
+// FRONTEND_URL names ONE spelling of the host, but the site answers on both
+// the apex and www. Listing only one meant a user who started on the other
+// spelling was sent back to the configured one -- a mid-login host switch that
+// lands them on a different origin than the one they clicked from. Accept both
+// spellings, exactly as the CORS check in server.js does.
+function allowedFrontendUrls() {
+    const list = ['http://localhost:3000'];
+    const configured = process.env.FRONTEND_URL;
+    if (!configured) return list;
+
+    list.push(configured);
+    try {
+        const { protocol, host } = new URL(configured);
+        const sibling = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
+        list.push(`${protocol}//${sibling}`);
+    } catch {
+        // Not a parseable URL; the exact string above still works.
+    }
+    return list;
+}
+
+const ALLOWED_FRONTEND_URLS = allowedFrontendUrls();
 
 router.get('/oauth-url', async (req, res) => {
     const provider  = req.query.provider; // 'google' or 'github'
