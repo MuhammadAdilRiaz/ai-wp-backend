@@ -5,10 +5,12 @@ const { requireAuth }           = require('../middleware/auth');
 const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
 const { selectProvider }        = require('../services/modelRouter');
-const { sendActionToWordPress, getWordPressContext } = require('../services/wordpress');
+const { getWordPressContext } = require('../services/wordpress');
+const { executeAction } = require('../services/wordpressConnector');
 const { getPlan } = require('../lib/plans');
 const { sendLowCreditEmail } = require('../lib/email');
 const router       = express.Router();
+const { normalizeImages, attachImagesToLastUserMessage } = require('../services/imageInput');
 
 // Minimum credits required just to send a message — real cost is calculated
 // AFTER we know actual token usage from the AI response (see creditsFromCost)
@@ -63,6 +65,13 @@ router.post('/message', async (req, res) => {
 
     if (!message || !site_id) {
         return res.status(400).json({ error: 'message and site_id are required.' });
+    }
+
+    let referenceImages;
+    try {
+        referenceImages = normalizeImages(req.body);
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
     }
 
     // ── 1. Check user has at least the minimum credits to attempt a message ───
@@ -170,13 +179,14 @@ router.post('/message', async (req, res) => {
     ];
 
     // ── 5. Decide which AI provider to use, then ask it what to do ────────────
-    const { provider, model } = await selectProvider(profile, { hasAttachment: !!has_attachment, message });
+    const { provider, model } = await selectProvider(profile, { hasAttachment: !!has_attachment || referenceImages.length > 0, message });
 
     let aiResult;
     try {
+        const messagesWithImages = attachImagesToLastUserMessage(messages, referenceImages, provider === 'claude' ? 'claude' : 'openai');
         aiResult = provider === 'claude'
-            ? await chatWithClaude(messages, wpContext, model)   // model: 'sonnet' | 'opus'
-            : await chatWithGPT(messages, wpContext);            // always 'luna' today
+            ? await chatWithClaude(messagesWithImages, wpContext, model)   // model: 'sonnet' | 'opus'
+            : await chatWithGPT(messagesWithImages, wpContext);            // always 'luna' today
     } catch (err) {
         console.error(`${provider} (${model}) API error:`, err);
         return res.status(500).json({ error: 'AI is temporarily unavailable. Please try again.' });
@@ -189,7 +199,7 @@ router.post('/message', async (req, res) => {
     // ── 6. Execute each action on the WordPress site ──────────────────────────
     for (const actionObj of actionsToRun) {
         const { action, ...params } = actionObj;
-        const result = await sendActionToWordPress(site.site_url, site.site_token, action, params);
+        const result = await executeAction(site, actionObj); // sensitive actions require a separate confirmed call
         actionResults.push({ action, ...result });
 
         // If an action fails, stop and report it
