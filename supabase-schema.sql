@@ -151,3 +151,28 @@ create index if not exists idx_conversations_user   on conversations(user_id);
 create index if not exists idx_conversations_session on conversations(session_id);
 create index if not exists idx_transactions_user    on credit_transactions(user_id);
 create index if not exists idx_chat_sessions_user   on chat_sessions(user_id, site_id);
+
+-- ───────────────────────────────────────────────────────────────────────────
+-- 7. USER SESSIONS — one row per login, so a session can be aged out.
+--
+-- Supabase access tokens expire hourly and refresh silently, which means
+-- nothing on its own ever ends a login. This table records when each login
+-- actually started (keyed by the `session_id` claim carried in the access
+-- token, which survives refreshes) so src/middleware/auth.js can force a
+-- fresh sign-in after 7 days, the way a normal app does.
+-- ───────────────────────────────────────────────────────────────────────────
+create table if not exists user_sessions (
+    session_id   uuid primary key,
+    user_id      uuid not null references profiles(id) on delete cascade,
+    started_at   timestamptz not null default now(),
+    last_seen_at timestamptz not null default now()
+);
+
+create index if not exists idx_user_sessions_user    on user_sessions(user_id);
+create index if not exists idx_user_sessions_started on user_sessions(started_at);
+
+-- 8. STARRED PROJECTS — the dashboard's star button, the Starred sidebar
+--    filter and the `starred` column selected in src/routes/sites.js have
+--    always needed this; it was missing from the schema. Without it
+--    GET /api/sites fails outright and no projects load.
+alter table sites add column if not exists starred boolean not null default false;

@@ -1,28 +1,72 @@
-// Short-lived, in-memory store for PKCE code_verifiers during Google/GitHub
-// login. Keyed by a random `state` value (one per login attempt) instead of
-// being tied to one shared Supabase client instance — this is what lets two
-// different users go through OAuth at the same time without overwriting
-// each other's verifier. See routes/auth.js (oauth-url / oauth-callback).
-const store = new Map();
-const TTL_MS = 5 * 60 * 1000; // an OAuth round-trip should finish well within 5 minutes
+// Holds the Supabase auth-client storage snapshot for an in-flight
+// Google/GitHub login, keyed by a random `state` (one per attempt) so two
+// people signing in at the same moment cannot collide.
+//
+// Why a whole snapshot and not just "the verifier": during the authorize step
+// supabase-js writes several keys, and they do not all hold the verifier --
+// <base>-flows-code-verifier is a JSON array of flow ids. Matching keys by
+// substring risked storing the wrong value, and the layout is an internal
+// detail that already changed between 2.43 and 2.112. Replaying the snapshot
+// verbatim means the exchange finds whatever key it actually asks for.
+//
+// Why Postgres and not memory: this ran on a Map in process memory, and the
+// backend is on Render free tier, which spins down when idle and recycles
+// instances -- a restart mid-login dropped the state and the user was bounced
+// back to /auth having just authenticated successfully.
+const supabase = require('./supabase');
 
-function save(state, verifier) {
-    store.set(state, { verifier, expires: Date.now() + TTL_MS });
+const TTL_MS = 5 * 60 * 1000; // an OAuth round-trip finishes well within this
+
+// snapshot: a plain object of storage key -> value
+async function save(state, snapshot) {
+    const { error } = await supabase
+        .from('oauth_states')
+        .insert({
+            state,
+            storage: JSON.stringify(snapshot),
+            created_at: new Date().toISOString(),
+        });
+
+    if (error) console.error('oauthStore.save failed:', error.message);
 }
 
-function consume(state) {
-    const entry = store.get(state);
-    store.delete(state); // one-time use either way
-    if (!entry || entry.expires < Date.now()) return null;
-    return entry.verifier;
-}
+async function consume(state) {
+    // Delete and read in one statement: single-use, so a replayed callback
+    // cannot reuse a snapshot even if it arrives twice.
+    const { data, error } = await supabase
+        .from('oauth_states')
+        .delete()
+        .eq('state', state)
+        .select('storage, created_at')
+        .maybeSingle();
 
-// Sweep anything that was never completed so this never grows unbounded
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of store) {
-        if (entry.expires < now) store.delete(key);
+    if (error) {
+        console.error('oauthStore.consume failed:', error.message);
+        return null;
     }
-}, 60 * 1000).unref();
+    if (!data) return null;
+    if (Date.now() - new Date(data.created_at).getTime() > TTL_MS) return null;
+
+    try {
+        return JSON.parse(data.storage);
+    } catch (err) {
+        console.error('oauthStore.consume: unreadable snapshot:', err.message);
+        return null;
+    }
+}
+
+// Sweep attempts that were never completed (user closed the provider tab, etc.)
+// so the table cannot grow without bound. Unreferenced so it never holds the
+// process open.
+setInterval(async () => {
+    try {
+        await supabase
+            .from('oauth_states')
+            .delete()
+            .lt('created_at', new Date(Date.now() - TTL_MS).toISOString());
+    } catch (err) {
+        console.error('oauthStore sweep failed:', err.message);
+    }
+}, 5 * 60 * 1000).unref();
 
 module.exports = { save, consume };

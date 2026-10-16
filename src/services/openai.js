@@ -24,7 +24,9 @@ async function chatWithGPT(history, wpContext) {
 
     const response = await getClient().chat.completions.create({
         model:       'gpt-5.6-luna', // cheap/high-volume tier — matches the "simple prompt, no file" package
-        max_tokens:  8000,
+        // Newer OpenAI models reject 'max_tokens' outright (400
+        // unsupported_parameter). 'max_completion_tokens' is the replacement.
+        max_completion_tokens: 8000,
         messages: [
             { role: 'system', content: systemPrompt },
             ...history,
