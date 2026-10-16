@@ -2,9 +2,38 @@ const express      = require('express');
 const supabase     = require('../lib/supabase');
 const { requireAuth } = require('../middleware/auth');
 const { pingWordPressSite } = require('../services/wordpress');
+const { inspectSite, executeAction, listCapabilities } = require('../services/wordpressConnector');
 const router       = express.Router();
 
 router.use(requireAuth);
+
+
+// WordPress connector capabilities, identical for OpenAI and Claude routes.
+router.get('/connector/capabilities', (req, res) => res.json(listCapabilities()));
+
+// Inspection is read-only. Existing sites are never modified by this endpoint.
+router.get('/:id/inspect', async (req, res) => {
+    const { data: site } = await supabase.from('sites').select('*')
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    try { res.json({ context: await inspectSite(site) }); }
+    catch (err) { res.status(502).json({ error: err.message }); }
+});
+
+// Sensitive actions are never executed directly from a model response.
+// Frontend must present an action preview and send an explicit confirmation.
+router.post('/:id/connector-action', async (req, res) => {
+    const { data: site } = await supabase.from('sites').select('*')
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (!req.body || req.body.confirm !== true || !req.body.action) {
+      return res.status(400).json({ error: 'An explicit confirm:true and an action are required' });
+    }
+    try {
+      const result = await executeAction(site, req.body.action, { approved: true });
+      res.status(result.success ? 200 : 400).json(result);
+    } catch (err) { res.status(400).json({ error: err.message }); }
+});
 
 // POST /api/sites/connect
 router.post('/connect', async (req, res) => {

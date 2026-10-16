@@ -7,6 +7,7 @@ const rateLimit  = require('express-rate-limit');
 const authRoutes = require('./routes/auth');
 const chatRoutes = require('./routes/chat');
 const siteRoutes = require('./routes/sites');
+const templateRoutes = require('./routes/templates');
 const creditRoutes = require('./routes/credits');
 const billingRoutes = require('./routes/billing');
 const webhookRoutes = require('./routes/webhooks');
@@ -78,6 +79,8 @@ app.use(cors({
 app.use('/api/webhooks', express.raw({ type: 'application/json' }), webhookRoutes);
 
 // ── Parse JSON bodies (everything except the webhook route above) ────────────
+// Allow image data URLs in chat JSON requests; Stripe raw-body handling stays unchanged.
+app.use('/api/chat/message', express.json({ limit: '12mb' }));
 app.use(express.json());
 
 // ── Rate limiting: max 60 requests per minute per IP ─────────────────────────
@@ -91,6 +94,7 @@ app.use(rateLimit({
 app.use('/api/auth',    authRoutes);
 app.use('/api/chat',    chatRoutes);
 app.use('/api/sites',   siteRoutes);
+app.use('/api/templates', templateRoutes);
 app.use('/api/credits', creditRoutes);
 app.use('/api/billing', billingRoutes);
 // /api/webhooks already mounted above, before express.json()
