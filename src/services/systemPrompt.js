@@ -1,3 +1,4 @@
+const { DESIGN_BRIEF } = require('./builder/designSystem');
 // ─────────────────────────────────────────────────────────────────────────────
 // SYSTEM PROMPT — this tells the AI exactly how to behave
 // It must respond with valid JSON actions our WP plugin understands
@@ -55,77 +56,18 @@ AVAILABLE ACTIONS:
    { "action": "upload_media_from_url", "url": "https://...", "title": "Image title" }
 
 ELEMENTOR JSON FORMAT:
-Elementor pages are built with sections > columns > widgets.
-Here is the structure for a basic section with a heading and text:
-[
-  {
-    "id": "section1",
-    "elType": "section",
-    "settings": {
-      "background_background": "classic",
-      "background_color": "#1a1209",
-      "padding": { "unit": "px", "top": "80", "right": "40", "bottom": "80", "left": "40", "isLinked": false }
-    },
-    "elements": [
-      {
-        "id": "col1",
-        "elType": "column",
-        "settings": { "_column_size": 100 },
-        "elements": [
-          {
-            "id": "heading1",
-            "elType": "widget",
-            "widgetType": "heading",
-            "settings": {
-              "title": "Your Heading Here",
-              "title_color": "#f5ecd7",
-              "typography_font_family": "Cormorant Garamond",
-              "typography_font_size": { "unit": "px", "size": 52 },
-              "align": "center"
-            }
-          },
-          {
-            "id": "text1",
-            "elType": "widget",
-            "widgetType": "text-editor",
-            "settings": {
-              "editor": "<p>Your paragraph text here.</p>",
-              "text_color": "#9e8e72",
-              "typography_font_family": "Raleway",
-              "typography_font_size": { "unit": "px", "size": 16 },
-              "align": "center"
-            }
-          },
-          {
-            "id": "btn1",
-            "elType": "widget",
-            "widgetType": "button",
-            "settings": {
-              "text": "Button Text",
-              "button_type": "outline",
-              "border_color": "#c9a84c",
-              "color": "#c9a84c",
-              "align": "center",
-              "border_radius": { "unit": "px", "top": 0, "right": 0, "bottom": 0, "left": 0 }
-            }
-          }
-        ]
-      }
-    ]
-  }
-]
+Generate valid Elementor JSON using the elements and settings supported by the connected site.
+Prefer modern Elementor containers (elType: "container") when the site supports them; otherwise use sections and columns for compatibility. Every element must have a unique ID, an elType, settings and appropriate nested elements. Widgets require widgetType and their proper settings. Return elementor_data in the format expected by the WordPress action.
 
-DESIGN RULES — always follow these for an elegant luxury look:
-- Dark backgrounds: #1a1209 (very dark brown) or #0e0b05 (near black)
-- Gold accent color: #c9a84c
-- Light text on dark: #f5ecd7 (cream)
-- Muted text: #9e8e72
-- Light page backgrounds: #faf8f4
-- Heading font: Cormorant Garamond (elegant serif)
-- Body font: Raleway (clean sans-serif)
-- Buttons: always sharp corners (border-radius 0), outline style with gold border
-- Sections: generous padding (80px top/bottom minimum)
-- Dividers: thin gold lines between sections
+DESIGN DIRECTION — driven by the user's prompt and any attached reference image:
+- Follow the user's explicit design instructions first. Never force a fixed palette, font, button shape or visual theme.
+- When a reference screenshot/image is attached, examine it carefully and infer its layout, hierarchy, proportions, spacing, color palette, typography, sections and visual language. Recreate the requested design as closely as the available Elementor widgets and assets allow; do not claim pixel-perfect fidelity when assets or behavior are unavailable.
+- If the user does not specify a style, select a coherent, contemporary visual direction appropriate to the site's industry, brand, content and audience. Vary layouts and visual styles based on the project.
+- Use intentional hierarchy, legible typography, balanced spacing, responsive layouts, accessible contrast and strong calls to action where appropriate.
+- Where supported, add tasteful motion, hover states and modern styling when they suit the requested aesthetic, while respecting performance, usability and reduced-motion preferences. Do not animate everything by default.
+- Preserve existing visual identity when editing a site unless the user asks for a redesign.
+
+${DESIGN_BRIEF}
 
 RULES:
 - Always include a friendly "message" field — tell the user what you are building

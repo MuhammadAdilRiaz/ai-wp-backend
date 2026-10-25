@@ -6,7 +6,8 @@ const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
 const { selectProvider }        = require('../services/modelRouter');
 const { getWordPressContext } = require('../services/wordpress');
-const { executeAction } = require('../services/wordpressConnector');
+const { executeWorkflow } = require('../services/builder/actionWorkflow');
+const { formatCompletion } = require('../services/builder/completionReport');
 const { getPlan } = require('../lib/plans');
 const { sendLowCreditEmail } = require('../lib/email');
 const router       = express.Router();
@@ -194,19 +195,9 @@ router.post('/message', async (req, res) => {
 
     const { parsed, usage } = aiResult;
     const actionsToRun = parsed.actions || [];
-    const actionResults = [];
-
-    // ── 6. Execute each action on the WordPress site ──────────────────────────
-    for (const actionObj of actionsToRun) {
-        const { action, ...params } = actionObj;
-        const result = await executeAction(site, actionObj); // sensitive actions require a separate confirmed call
-        actionResults.push({ action, ...result });
-
-        // If an action fails, stop and report it
-        if (!result.success) {
-            console.error(`Action failed: ${action}`, result.error);
-        }
-    }
+    // Execute ordered actions, validating Elementor structures and resolving references.
+    const actionResults = await executeWorkflow(site, actionsToRun);
+    const completionMessage = formatCompletion(parsed.message, actionResults);
 
     // ── 7. Work out the real credit cost for THIS message, then deduct ────────
     // Charged from ACTUAL token usage × the model actually used, not a flat
@@ -254,7 +245,7 @@ router.post('/message', async (req, res) => {
             site_id:    site_id,
             session_id: activeSessionId,
             role:       'assistant',
-            content:    parsed.message,
+            content:    completionMessage,
             metadata:   { actions: actionsToRun, results: actionResults },
             created_at: new Date().toISOString(),
         },
@@ -283,7 +274,7 @@ router.post('/message', async (req, res) => {
 
     // ── 10. Return everything to the frontend ─────────────────────────────────
     res.json({
-        message:        parsed.message,
+        message:        completionMessage,
         actions:        actionsToRun,
         action_results: actionResults,
         credits_used:   toDisplay(creditsToCharge),
