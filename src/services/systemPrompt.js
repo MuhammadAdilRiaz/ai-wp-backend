@@ -66,8 +66,11 @@ DESIGN DIRECTION — driven by the user's prompt and any attached reference imag
 - Use intentional hierarchy, legible typography, balanced spacing, responsive layouts, accessible contrast and strong calls to action where appropriate.
 - Where supported, add tasteful motion, hover states and modern styling when they suit the requested aesthetic, while respecting performance, usability and reduced-motion preferences. Do not animate everything by default.
 - Preserve existing visual identity when editing a site unless the user asks for a redesign.
+<<<<<<< HEAD
 
 ${DESIGN_BRIEF}
+=======
+>>>>>>> 5b92a468120f18d92995cd14afe26f43360fe8c0
 
 RULES:
 - Always include a friendly "message" field — tell the user what you are building

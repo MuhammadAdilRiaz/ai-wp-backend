@@ -5,9 +5,7 @@ const { requireAuth }           = require('../middleware/auth');
 const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
 const { selectProvider }        = require('../services/modelRouter');
-const { getWordPressContext } = require('../services/wordpress');
-const { executeWorkflow } = require('../services/builder/actionWorkflow');
-const { formatCompletion } = require('../services/builder/completionReport');
+const { sendActionToWordPress, getWordPressContext } = require('../services/wordpress');
 const { getPlan } = require('../lib/plans');
 const { sendLowCreditEmail } = require('../lib/email');
 const router       = express.Router();
@@ -195,9 +193,19 @@ router.post('/message', async (req, res) => {
 
     const { parsed, usage } = aiResult;
     const actionsToRun = parsed.actions || [];
-    // Execute ordered actions, validating Elementor structures and resolving references.
-    const actionResults = await executeWorkflow(site, actionsToRun);
-    const completionMessage = formatCompletion(parsed.message, actionResults);
+    const actionResults = [];
+
+    // ── 6. Execute each action on the WordPress site ──────────────────────────
+    for (const actionObj of actionsToRun) {
+        const { action, ...params } = actionObj;
+        const result = await sendActionToWordPress(site.site_url, site.site_token, action, params);
+        actionResults.push({ action, ...result });
+
+        // If an action fails, stop and report it
+        if (!result.success) {
+            console.error(`Action failed: ${action}`, result.error);
+        }
+    }
 
     // ── 7. Work out the real credit cost for THIS message, then deduct ────────
     // Charged from ACTUAL token usage × the model actually used, not a flat
