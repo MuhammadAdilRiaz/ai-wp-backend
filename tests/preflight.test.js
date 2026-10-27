@@ -1,0 +1,12 @@
+const assert = require('node:assert/strict');
+const {preflight} = require('../src/services/builder/preflight');
+let result = preflight({plugins:[],elementor:false,builder:'classic',preferences:{default_builder:'auto'}},'build a business website');
+assert.equal(result.ready,false);assert.equal(result.needs[0].slug,'elementor');
+result=preflight({plugins:[{file:'elementor/elementor.php',active:false}],elementor:false,builder:'classic',preferences:{default_builder:'auto'}},'make a homepage');
+assert.equal(result.needs[0].action,'activate_plugin');
+result=preflight({plugins:[],elementor:true,builder:'elementor',woocommerce:false},'create an online shop with checkout');
+assert.equal(result.needs[0].slug,'woocommerce');
+result=preflight({plugins:[],elementor:true,builder:'elementor',woocommerce:true},'create an online shop with checkout');
+assert.equal(result.ready,true);
+result=preflight(null,'create a website');assert.equal(result.ready,false);
+console.log('Preflight tests passed');

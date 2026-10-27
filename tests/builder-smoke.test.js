@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
-const { validatePagePayload } = require('../../../Downloads/elimeni-ai-builder-backend-v2/ai-wp-backend-main/src/services/quality/pageValidator');
-const { formatCompletion } = require('../../../Downloads/elimeni-ai-builder-backend-v2/ai-wp-backend-main/src/services/builder/completionReport');
-const { buildSystemPrompt } = require('../../../Downloads/elimeni-ai-builder-backend-v2/ai-wp-backend-main/src/services/systemPrompt');
+const { validatePagePayload } = require('../src/services/quality/pageValidator');
+const { formatCompletion } = require('../src/services/builder/completionReport');
+const { buildSystemPrompt } = require('../src/services/systemPrompt');
 assert.deepEqual(validatePagePayload({ action:'create_elementor_page',elementor_data:'[]' }), ['Elementor layout must contain at least one element']);
 assert.deepEqual(validatePagePayload({ action:'create_elementor_page',elementor_data:'[{"id":"abc","elType":"widget","widgetType":"heading","settings":{}}]' }), []);
 assert.match(formatCompletion('Done!',[{action:'create_page',title:'Home',success:true,data:{result:{page_id:12,url:'https://example.com/home/'}}}]), /https:\/\/example.com\/home\//);

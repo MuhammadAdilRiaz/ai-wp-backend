@@ -153,8 +153,8 @@ RULES:
 // history: array of { role: 'user'|'assistant', content: string }
 // ─────────────────────────────────────────────────────────────────────────────
 const MODEL_IDS = {
-    sonnet: 'claude-sonnet-5',
-    opus:   'claude-opus-5', // business/enterprise heavy builds
+    sonnet: process.env.ELIMENI_CLAUDE_SONNET_MODEL || 'claude-sonnet-5',
+    opus: process.env.ELIMENI_CLAUDE_OPUS_MODEL || 'claude-opus-5', // business/enterprise heavy builds
 };
 
 async function chatWithClaude(history, wpContext, tier = 'sonnet') {
@@ -183,13 +183,14 @@ async function chatWithClaude(history, wpContext, tier = 'sonnet') {
         // Strip markdown code fences if Claude accidentally adds them
         const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         const parsed  = JSON.parse(cleaned);
-        return { success: true, parsed, raw: rawText };
+        return { success: true, parsed, raw: rawText, usage: { input_tokens: response.usage?.input_tokens || 0, output_tokens: response.usage?.output_tokens || 0 } };
     } catch (err) {
         // If Claude returns plain text (for questions), wrap it
         return {
             success: true,
             parsed: { message: rawText, actions: [], done: true },
             raw: rawText,
+            usage: { input_tokens: response.usage?.input_tokens || 0, output_tokens: response.usage?.output_tokens || 0 },
         };
     }
 }

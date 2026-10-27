@@ -8,6 +8,9 @@ const { selectProvider }        = require('../services/modelRouter');
 const { getWordPressContext } = require('../services/wordpress');
 const { executeWorkflow } = require('../services/builder/actionWorkflow');
 const { formatCompletion } = require('../services/builder/completionReport');
+const { preflight } = require('../services/builder/preflight');
+const { isWebsiteBuildRequest } = require('../services/builder/taskRouting');
+const { prepareCreativeBrief, createHeroAsset } = require('../services/builder/openaiAssets');
 const { getPlan } = require('../lib/plans');
 const { sendLowCreditEmail } = require('../lib/email');
 const router       = express.Router();
@@ -56,12 +59,20 @@ const { toDisplay } = require('../lib/credits');
 
 router.use(requireAuth);
 
+// Handle rejected async route promises without terminating the Render process.
+const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(err => {
+    console.error('Chat endpoint failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'The request failed. No completion was confirmed; please check your site before retrying.' });
+    else next(err);
+});
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/chat/message
 // Body: { site_id, message, history, session_id }
 // This is the main endpoint — user sends a message, AI responds, WP gets updated
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/message', async (req, res) => {
+router.post('/message', asyncHandler(async (req, res) => {
     const { site_id, message, history = [], session_id, has_attachment = false } = req.body;
 
     if (!message || !site_id) {
@@ -169,41 +180,96 @@ router.post('/message', async (req, res) => {
     // ── 3. Get current WordPress site context for the AI ──────────────────────
     const wpContext = await getWordPressContext(site.site_url, site.site_token);
 
+    // Fail closed before AI generation: never publish unstyled HTML when Elementor is absent.
+    const buildIntent = isWebsiteBuildRequest(message);
+    if (buildIntent) {
+        const check = preflight(wpContext, message);
+        if (!check.ready) {
+            const reason = check.error || 'Required WordPress plugins are missing or inactive.';
+            const suggestions = check.needs.map(x => ({ action:x.action, slug:x.slug, ...(x.plugin_file ? { plugin_file:x.plugin_file } : {}), reason:x.reason }));
+            const reply = suggestions.length
+                ? `Before building, please approve: ${suggestions.map(x => `${x.action.replace('_', ' ')} ${x.slug}`).join(', ')}. Nothing was published.`
+                : `${reason} Nothing was published.`;
+            return res.json({ message: reply, actions: [], action_results: [], approval_required: suggestions, credits_used: 0, credits_left: toDisplay(profile.credits), session_id: activeSessionId });
+        }
+    }
+
     // ── 4. Build conversation history — only send the last N messages ─────────
     // Keeps input tokens (and cost) bounded no matter how long the chat gets
-    const MAX_HISTORY_MESSAGES = 12;
-    const trimmedHistory = history.slice(-MAX_HISTORY_MESSAGES);
+    const MAX_HISTORY_MESSAGES = buildIntent ? 4 : 10;
+    const trimmedHistory = (Array.isArray(history) ? history : [])
+        .filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string')
+        .slice(-MAX_HISTORY_MESSAGES)
+        .map(m => ({role:m.role,content:m.content.slice(0, buildIntent ? 900 : 1800)}));
 
     const messages = [
         ...trimmedHistory,
         { role: 'user', content: message },
     ];
 
-    // ── 5. Decide which AI provider to use, then ask it what to do ────────────
-    const { provider, model } = await selectProvider(profile, { hasAttachment: !!has_attachment || referenceImages.length > 0, message });
-
+    // ── 5. Website development is Claude-only; OpenAI is the creative/asset specialist.
+    // General non-build chats still use the unchanged subscription model router.
+    const routing = buildIntent ? null : await selectProvider(profile, { hasAttachment: !!has_attachment || referenceImages.length > 0, message });
+    const provider = buildIntent ? 'claude' : routing.provider;
+    const model = buildIntent ? ((profile.plan === 'business' || profile.plan === 'agency') ? 'opus' : 'sonnet') : routing.model;
     let aiResult;
+    let creative = null;
+    let heroAsset = null;
+    let creativeUsage = null;
     try {
-        const messagesWithImages = attachImagesToLastUserMessage(messages, referenceImages, provider === 'claude' ? 'claude' : 'openai');
-        aiResult = provider === 'claude'
-            ? await chatWithClaude(messagesWithImages, wpContext, model)   // model: 'sonnet' | 'opus'
-            : await chatWithGPT(messagesWithImages, wpContext);            // always 'luna' today
+        if (buildIntent) {
+            // Fail BEFORE any WordPress write. No automatic GPT website-building fallback.
+            if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error:'Claude API is required for website development. Configure ANTHROPIC_API_KEY in Render. No WordPress changes were made.' });
+            creative = await prepareCreativeBrief({ request:message, wpContext, images:referenceImages });
+            creativeUsage = creative.usage;
+            try {
+                heroAsset = await createHeroAsset(creative.brief);
+            } catch (assetError) {
+                console.error('OpenAI asset generation failed:', assetError.message);
+                heroAsset = { status:'failed', reason:'Could not generate/upload hero image' };
+            }
+            const briefMessage = JSON.stringify({
+                role:'creative_brief_from_openai',
+                instruction:'You are the ONLY website layout/page/Elementor/action builder. Use this creative direction, content, and real media URL if available. Never invent a media URL; if missing, describe missing assets. Do not output raw CSS in plain create_page content.',
+                creative_brief:creative.brief,
+                generated_asset:heroAsset,
+            });
+            const claudeMessages = [
+                ...messages.slice(0,-1),
+                {role:'user',content:`${message}\n\n${briefMessage}`},
+            ];
+            const withImages = attachImagesToLastUserMessage(claudeMessages, referenceImages, 'claude');
+            aiResult = await chatWithClaude(withImages, wpContext, model);
+        } else {
+            const withImages = attachImagesToLastUserMessage(messages, referenceImages, provider === 'claude' ? 'claude' : 'openai');
+            aiResult = provider === 'claude'
+                ? await chatWithClaude(withImages, wpContext, model)
+                : await chatWithGPT(withImages, wpContext);
+        }
     } catch (err) {
         console.error(`${provider} (${model}) API error:`, err);
-        return res.status(500).json({ error: 'AI is temporarily unavailable. Please try again.' });
+        return res.status(502).json({ error: buildIntent ? 'Hybrid website creation failed before publishing. Check Anthropic and OpenAI API configuration and model access.' : 'AI is temporarily unavailable. Please try again.' });
     }
 
     const { parsed, usage } = aiResult;
-    const actionsToRun = parsed.actions || [];
+    if (!parsed || typeof parsed !== 'object') return res.status(502).json({error:'Invalid AI response; nothing was published.'});
+    const actionsToRun = Array.isArray(parsed.actions) ? parsed.actions : [];
+    if (actionsToRun.some(a => a.action === 'create_page' && /<style|:root\s*\{|\.sw-/i.test(a.content || ''))) {
+        return res.status(422).json({ error:'Unsafe page output: generated CSS/HTML was not a valid Elementor layout. Nothing was published. Please request an Elementor-native page.' });
+    }
     // Execute ordered actions, validating Elementor structures and resolving references.
     const actionResults = await executeWorkflow(site, actionsToRun);
-    const completionMessage = formatCompletion(parsed.message, actionResults);
+    const completionMessage = formatCompletion(parsed.message, actionResults, { buildIntent });
 
     // ── 7. Work out the real credit cost for THIS message, then deduct ────────
     // Charged from ACTUAL token usage × the model actually used, not a flat
     // per-action guess — a Claude heavy build and a Luna one-liner should not
     // cost the same number of credits.
-    const estimatedCost   = estimateCost(provider, model, usage);
+    // OpenAI content-model rates are configurable; do not silently bill fictional fixed prices.
+    const contentInRate = Number(process.env.ELIMENI_OPENAI_CONTENT_INPUT_USD_PER_M || 0);
+    const contentOutRate = Number(process.env.ELIMENI_OPENAI_CONTENT_OUTPUT_USD_PER_M || 0);
+    const contentCost = creativeUsage ? ((creativeUsage.input_tokens || 0) * contentInRate + (creativeUsage.output_tokens || 0) * contentOutRate) / 1_000_000 : 0;
+    const estimatedCost = estimateCost(provider, model, usage) + contentCost;
     const creditsToCharge = await creditsFromCost(estimatedCost); // REAL credits
 
     await supabase.rpc('deduct_credits', {
@@ -226,6 +292,10 @@ router.post('/message', async (req, res) => {
             output_tokens: usage?.output_tokens || 0,
             estimated_cost: estimatedCost,
             session_id: activeSessionId,
+            openai_content_tokens: creativeUsage || null,
+            generated_asset_status: heroAsset?.status || null,
+            usage_estimate_excludes_image_generation: true,
+            openai_content_cost_usd: contentCost,
         },
         created_at:  new Date().toISOString(),
     });
@@ -280,9 +350,14 @@ router.post('/message', async (req, res) => {
         credits_used:   toDisplay(creditsToCharge),
         credits_left:   toDisplay(updatedProfile?.credits || 0),
         provider,
+        content_provider: buildIntent ? 'openai' : null,
+        asset_status: heroAsset?.status || null,
         session_id: activeSessionId,
+        build_status: buildIntent ? (actionResults.length && actionResults.every(r => r.success) ? 'completed' : 'needs_attention') : null,
+        actions_completed: actionResults.filter(r => r.success).length,
+        actions_failed: actionResults.filter(r => !r.success).length,
     });
-});
+ }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/chat/sessions?site_id=xxx — list this user's past chats for the sidebar
