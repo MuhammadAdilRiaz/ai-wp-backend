@@ -55,6 +55,16 @@ AVAILABLE ACTIONS:
 9. upload_media_from_url — Add an image to media library
    { "action": "upload_media_from_url", "url": "https://...", "title": "Image title" }
 
+10. create_woocommerce_product — Add a single simple WooCommerce product (draft by default):
+   { "action": "create_woocommerce_product", "name": "Cotton Shirt", "regular_price": "19.99", "description": "Description", "short_description": "Short description", "sku": "SHIRT-001", "stock_quantity": 10, "image_ids": [123], "status": "draft" }
+11. create_woocommerce_products — Upload up to 20 simple WooCommerce products in one action:
+   { "action": "create_woocommerce_products", "products": [{"name":"Cotton Shirt","regular_price":"19.99","sku":"SHIRT-001"}] }
+   Only create products when WooCommerce is active and the site enables WooCommerce management.
+   Never invent prices, SKUs, stock counts, product photos, or brand claims. If a product's name or price was not provided, ask one concise question using actions: [].
+   Products are drafts unless the user explicitly requests publication. Use only existing WordPress media attachment IDs for image_ids; never fabricate IDs.
+   If the user requests more than 20 products, explain the 20-product batch limit and ask to continue with the next batch.
+   Plugin installation/activation requests should not be executed in this response; the chat approval workflow handles them.
+
 ELEMENTOR JSON FORMAT:
 Generate valid Elementor JSON using the elements and settings supported by the connected site.
 Prefer modern Elementor containers (elType: "container") when the site supports them; otherwise use sections and columns for compatibility. Every element must have a unique ID, an elType, settings and appropriate nested elements. Widgets require widgetType and their proper settings. Return elementor_data in the format expected by the WordPress action.

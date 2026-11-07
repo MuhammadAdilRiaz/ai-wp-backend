@@ -8,9 +8,12 @@ function formatCompletion(aiMessage, results, options = {}) {
   const ok = results.filter(r => r && r.success);
   const failed = results.filter(r => !r || !r.success);
   const pages = ok.filter(r => /(?:create|update)_elementor_page|(?:create|update)_page/.test(r.action || ''));
+  const products = ok.reduce((total,r) => total + (r.action === 'create_woocommerce_product' ? 1 : r.action === 'create_woocommerce_products' ? Number((r.data?.result || r.result || {}).count || 0) : 0), 0);
+  const partialProducts = failed.reduce((total,r) => total + (Array.isArray(r.created) ? r.created.length : 0), 0);
   const parts = [];
   if (failed.length) parts.push(`${ok.length} WordPress action(s) completed; ${failed.length} failed.`);
   else parts.push(`${ok.length} WordPress action(s) completed successfully.`);
+  if (products || partialProducts) parts.push(`${products + partialProducts} WooCommerce product(s) created${failed.length ? ' (check failed items)' : ''}.`);
   if (pages.length) parts.push(`Pages: ${pages.map(r => r.title || r.slug || 'Page').slice(0, 8).join(', ')}${pages.length > 8 ? '…' : ''}.`);
   const urls = ok.map(r => (r.data?.result || r.result || {}).url).filter(u => typeof u === 'string' && /^https:\/\//.test(u)).slice(0, 3);
   if (urls.length) parts.push(`Review: ${urls.join(' | ')}`);

@@ -7,6 +7,7 @@ const PAGE_ACTIONS = new Set([
   'create_page', 'update_page', 'create_elementor_page',
   'update_elementor_page', 'upload_media_from_url',
   'create_menu', 'add_menu_item', 'set_homepage', 'update_site_option',
+  'create_woocommerce_product', 'create_woocommerce_products',
 ]);
 const SENSITIVE_ACTIONS = new Set([
   'install_plugin', 'activate_plugin', 'install_theme',
@@ -29,6 +30,14 @@ function validateAction(actionObj) {
   if (['update_page','update_elementor_page','set_homepage','delete_page'].includes(action) &&
       (!Number.isSafeInteger(Number(params.page_id)) || Number(params.page_id) <= 0)) {
     throw new Error(`${action} requires a valid page_id`);
+  }
+  if (['create_woocommerce_product','create_woocommerce_products'].includes(action)) {
+    const products = action === 'create_woocommerce_product' ? [params] : params.products;
+    if (!Array.isArray(products) || products.length < 1 || products.length > 20 ||
+        products.some(p => !p || typeof p !== 'object' || !String(p.name || '').trim() ||
+            !/^(0|[0-9]+)(\.[0-9]{1,2})?$/.test(String(p.regular_price ?? '')))) {
+      throw new Error('Provide 1-20 products with name and a valid nonnegative regular_price');
+    }
   }
   if (['install_plugin', 'install_theme'].includes(action) &&
       !/^[a-z0-9-]+$/.test(params.slug || '')) throw new Error('Invalid plugin/theme slug');
@@ -60,7 +69,7 @@ function listCapabilities() {
     readonly: [...READ_ACTIONS, 'inspect_site'],
     standard: [...PAGE_ACTIONS],
     requires_confirmation: [...SENSITIVE_ACTIONS],
-    unavailable_without_additional_adapters: ['create_woocommerce_product', 'update_woocommerce_product', 'edit_divi_page', 'edit_wpbakery_page'],
+    unavailable_without_additional_adapters: ['update_woocommerce_product', 'edit_divi_page', 'edit_wpbakery_page'],
   };
 }
 

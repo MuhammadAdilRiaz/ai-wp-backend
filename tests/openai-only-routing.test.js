@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const chat = fs.readFileSync(path.join(__dirname, '..', 'src/routes/chat.js'),'utf8');
+const openai = fs.readFileSync(path.join(__dirname, '..', 'src/services/openai.js'),'utf8');
+assert(!chat.includes('chatWithClaude'), 'Active chat must not invoke Claude');
+assert(!chat.includes('selectProvider'), 'Active chat must not route to Claude');
+assert(!chat.includes('ANTHROPIC_API_KEY'), 'Claude key must not be required');
+assert(chat.includes('ELIMENI_OPENAI_BUILD_MODEL'), 'Build model must be independently configurable');
+assert(chat.includes('ELIMENI_OPENAI_CHAT_MODEL'), 'Chat model must be independently configurable');
+assert(chat.includes('prepareCreativeBrief'), 'Original OpenAI content pipeline must be retained');
+assert(chat.includes('executeWorkflow'), 'WordPress workflow must be retained');
+assert(chat.includes('preflight(wpContext, message)'), 'Plugin preflight gate must be retained');
+assert(openai.includes('response.usage?.prompt_tokens'), 'OpenAI usage must be captured');
+console.log('OpenAI-only routing checks passed.');

@@ -2,13 +2,12 @@ const express      = require('express');
 const supabase     = require('../lib/supabase');
 const { getSettings } = require('../lib/setting');
 const { requireAuth }           = require('../middleware/auth');
-const { chatWithClaude }        = require('../services/claude');
 const { chatWithGPT }           = require('../services/openai');
-const { selectProvider }        = require('../services/modelRouter');
 const { getWordPressContext } = require('../services/wordpress');
 const { executeWorkflow } = require('../services/builder/actionWorkflow');
 const { formatCompletion } = require('../services/builder/completionReport');
 const { preflight } = require('../services/builder/preflight');
+const { getPluginRequest, isProductTask } = require('../services/builder/pluginRequests');
 const { isWebsiteBuildRequest } = require('../services/builder/taskRouting');
 const { prepareCreativeBrief, createHeroAsset } = require('../services/builder/openaiAssets');
 const { getPlan } = require('../lib/plans');
@@ -21,26 +20,6 @@ const { normalizeImages, attachImagesToLastUserMessage } = require('../services/
 const MIN_CREDITS_TO_START = 2;
 const TRIAL_DAILY_MESSAGE_CAP = 15; // spreads the 30-credit trial allotment over the week, blunts scripted bursts
 const LOW_CREDIT_THRESHOLD = 0.20; // nudge email fires once a paid user drops to 20% of their monthly allotment
-
-// Real $ cost per request, from actual token usage returned by the provider.
-// This drives BOTH internal margin tracking AND what we charge the user —
-// see creditsFromCost() below. Keep in sync with your provider dashboards.
-const RATES = {
-    claude: {
-        sonnet: { input: 2 / 1_000_000, output: 10 / 1_000_000 }, // Claude Sonnet 5
-        opus:   { input: 5 / 1_000_000, output: 25 / 1_000_000 }, // Claude Opus 5
-    },
-    chatgpt: {
-        luna: { input: 0.20 / 1_000_000, output: 1.20 / 1_000_000 }, // GPT-5.6 Luna
-    },
-};
-
-function estimateCost(provider, model, usage) {
-    const rate = RATES[provider]?.[model];
-    if (!rate || !usage) return 0;
-    const cost = (usage.input_tokens || 0) * rate.input + (usage.output_tokens || 0) * rate.output;
-    return Number(cost.toFixed(6));
-}
 
 // Convert a real $ cost into REAL backend credits. usd_per_real_credit is a
 // SIZING unit ("$0.005 of raw cost = 1 real credit"), not a price — margin
@@ -180,6 +159,52 @@ router.post('/message', asyncHandler(async (req, res) => {
     // ── 3. Get current WordPress site context for the AI ──────────────────────
     const wpContext = await getWordPressContext(site.site_url, site.site_token);
 
+    // Explicit plugin requests are handled deterministically, with user approval.
+    // No API tokens or WordPress writes are spent until the user approves.
+    const pluginRequest = getPluginRequest(message);
+    if (pluginRequest) {
+        if (pluginRequest.error) return res.json({
+            message: pluginRequest.error, actions: [], action_results: [],
+            approval_required: [], credits_used: 0, credits_left: toDisplay(profile.credits), session_id: activeSessionId,
+        });
+        if (!wpContext || wpContext.error || wpContext.code || !Array.isArray(wpContext.plugins)) {
+            return res.status(502).json({ error: 'Could not inspect installed plugins. No installation was attempted.' });
+        }
+        const existing = wpContext.plugins.find(p => String(p.file || '').startsWith(`${pluginRequest.slug}/`));
+        const active = Boolean(existing && (existing.active === true || existing.status === 'active')) ||
+            (pluginRequest.slug === 'woocommerce' && !!wpContext.woocommerce) ||
+            (pluginRequest.slug === 'elementor' && !!wpContext.elementor);
+        if (active) return res.json({
+            message: `${pluginRequest.slug} is already active. What would you like me to do with it?`,
+            actions: [], action_results: [], approval_required: [], credits_used: 0,
+            credits_left: toDisplay(profile.credits), session_id: activeSessionId,
+        });
+        const action = existing
+            ? { action: 'activate_plugin', slug: pluginRequest.slug, plugin_file: existing.file }
+            : { action: 'install_plugin', slug: pluginRequest.slug };
+        return res.json({
+            message: `I can ${existing ? 'activate' : 'install'} ${pluginRequest.slug}. Please review and approve below. No changes have been made.`,
+            actions: [], action_results: [], approval_required: [action], credits_used: 0,
+            credits_left: toDisplay(profile.credits), session_id: activeSessionId,
+        });
+    }
+
+    // Product-only tasks require WooCommerce but do not require Elementor.
+    const productTask = isProductTask(message);
+    if (productTask && (!wpContext || wpContext.error || wpContext.code)) {
+        return res.status(502).json({ error: 'WordPress inspection failed. No products were created.' });
+    }
+    if (productTask && !wpContext.woocommerce) {
+        const installed = (wpContext.plugins || []).find(p => String(p.file || '').startsWith('woocommerce/'));
+        const approval = installed
+            ? { action: 'activate_plugin', slug: 'woocommerce', plugin_file: installed.file }
+            : { action: 'install_plugin', slug: 'woocommerce' };
+        return res.json({
+            message: 'WooCommerce is required to upload products. Please approve the plugin setup first; no products were uploaded.',
+            actions: [], action_results: [], approval_required: [approval], credits_used: 0,
+            credits_left: toDisplay(profile.credits), session_id: activeSessionId,
+        });
+    }
     // Fail closed before AI generation: never publish unstyled HTML when Elementor is absent.
     const buildIntent = isWebsiteBuildRequest(message);
     if (buildIntent) {
@@ -196,59 +221,67 @@ router.post('/message', asyncHandler(async (req, res) => {
 
     // ── 4. Build conversation history — only send the last N messages ─────────
     // Keeps input tokens (and cost) bounded no matter how long the chat gets
-    const MAX_HISTORY_MESSAGES = buildIntent ? 4 : 10;
+    const activeBuildTask = buildIntent || productTask;
+    const MAX_HISTORY_MESSAGES = activeBuildTask ? 4 : 10;
     const trimmedHistory = (Array.isArray(history) ? history : [])
         .filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string')
         .slice(-MAX_HISTORY_MESSAGES)
-        .map(m => ({role:m.role,content:m.content.slice(0, buildIntent ? 900 : 1800)}));
+        .map(m => ({role:m.role,content:m.content.slice(0, activeBuildTask ? 900 : 1800)}));
 
     const messages = [
         ...trimmedHistory,
         { role: 'user', content: message },
     ];
 
-    // ── 5. Website development is Claude-only; OpenAI is the creative/asset specialist.
-    // General non-build chats still use the unchanged subscription model router.
-    const routing = buildIntent ? null : await selectProvider(profile, { hasAttachment: !!has_attachment || referenceImages.length > 0, message });
-    const provider = buildIntent ? 'claude' : routing.provider;
-    const model = buildIntent ? ((profile.plan === 'business' || profile.plan === 'agency') ? 'opus' : 'sonnet') : routing.model;
+    // ── 5. OpenAI-only execution. No Anthropic API calls on either route. ──
+    // A separate, configurable build model handles website design and Elementor actions.
+    // The inexpensive chat model handles everyday conversation and questions.
+    const provider = 'chatgpt';
+    const model = activeBuildTask
+        ? (process.env.ELIMENI_OPENAI_BUILD_MODEL || 'gpt-4.1')
+        : (process.env.ELIMENI_OPENAI_CHAT_MODEL || 'gpt-4.1-mini');
     let aiResult;
     let creative = null;
     let heroAsset = null;
     let creativeUsage = null;
     try {
+        if (!process.env.OPENAI_API_KEY) {
+            return res.status(503).json({ error: 'OPENAI_API_KEY is not configured. No WordPress changes were made.' });
+        }
+        let workingMessages = messages;
         if (buildIntent) {
-            // Fail BEFORE any WordPress write. No automatic GPT website-building fallback.
-            if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error:'Claude API is required for website development. Configure ANTHROPIC_API_KEY in Render. No WordPress changes were made.' });
-            creative = await prepareCreativeBrief({ request:message, wpContext, images:referenceImages });
+            // OpenAI prepares the brand, original text, visuals and icons first.
+            creative = await prepareCreativeBrief({ request: message, wpContext, images: referenceImages });
             creativeUsage = creative.usage;
             try {
                 heroAsset = await createHeroAsset(creative.brief);
             } catch (assetError) {
-                console.error('OpenAI asset generation failed:', assetError.message);
-                heroAsset = { status:'failed', reason:'Could not generate/upload hero image' };
+                console.error('OpenAI image preparation error:', assetError);
+                heroAsset = { status: 'failed', reason: 'Image creation/upload failed' };
             }
             const briefMessage = JSON.stringify({
-                role:'creative_brief_from_openai',
-                instruction:'You are the ONLY website layout/page/Elementor/action builder. Use this creative direction, content, and real media URL if available. Never invent a media URL; if missing, describe missing assets. Do not output raw CSS in plain create_page content.',
-                creative_brief:creative.brief,
-                generated_asset:heroAsset,
+                role: 'creative_brief_from_openai',
+                instruction: 'You are the OpenAI website architect, designer, Elementor builder, and WordPress action planner. Use the creative brief for content, brand design, visuals and icons. Only use real media URLs; never invent them. Produce structured WordPress actions with valid Elementor data, never raw CSS in page text.',
+                creative_brief: creative.brief,
+                generated_asset: heroAsset,
             });
-            const claudeMessages = [
-                ...messages.slice(0,-1),
-                {role:'user',content:`${message}\n\n${briefMessage}`},
+            workingMessages = [
+                ...messages.slice(0, -1),
+                { role: 'user', content: `${message}\n\n${briefMessage}` },
             ];
-            const withImages = attachImagesToLastUserMessage(claudeMessages, referenceImages, 'claude');
-            aiResult = await chatWithClaude(withImages, wpContext, model);
-        } else {
-            const withImages = attachImagesToLastUserMessage(messages, referenceImages, provider === 'claude' ? 'claude' : 'openai');
-            aiResult = provider === 'claude'
-                ? await chatWithClaude(withImages, wpContext, model)
-                : await chatWithGPT(withImages, wpContext);
         }
+        const withImages = attachImagesToLastUserMessage(workingMessages, referenceImages, 'openai');
+        aiResult = await chatWithGPT(withImages, wpContext, {
+            model,
+            maxCompletionTokens: activeBuildTask ? 12000 : 3000,
+        });
     } catch (err) {
-        console.error(`${provider} (${model}) API error:`, err);
-        return res.status(502).json({ error: buildIntent ? 'Hybrid website creation failed before publishing. Check Anthropic and OpenAI API configuration and model access.' : 'AI is temporarily unavailable. Please try again.' });
+        console.error(`OpenAI (${model}) API error:`, err);
+        return res.status(502).json({
+            error: buildIntent
+                ? 'OpenAI website generation failed before publishing. Verify your API key, model access and available quota.'
+                : 'OpenAI is temporarily unavailable. Please try again.',
+        });
     }
 
     const { parsed, usage } = aiResult;
@@ -259,17 +292,28 @@ router.post('/message', asyncHandler(async (req, res) => {
     }
     // Execute ordered actions, validating Elementor structures and resolving references.
     const actionResults = await executeWorkflow(site, actionsToRun);
-    const completionMessage = formatCompletion(parsed.message, actionResults, { buildIntent });
+    const completionMessage = formatCompletion(parsed.message, actionResults, { buildIntent: activeBuildTask });
 
     // ── 7. Work out the real credit cost for THIS message, then deduct ────────
     // Charged from ACTUAL token usage × the model actually used, not a flat
     // per-action guess — a Claude heavy build and a Luna one-liner should not
     // cost the same number of credits.
-    // OpenAI content-model rates are configurable; do not silently bill fictional fixed prices.
+    // Cost rates are configurable per model. Update them from OpenAI pricing.
+    // Missing pricing never silently appears as a verified $0 estimate.
+    const buildInRate = Number(process.env.ELIMENI_OPENAI_BUILD_INPUT_USD_PER_M || 0);
+    const buildOutRate = Number(process.env.ELIMENI_OPENAI_BUILD_OUTPUT_USD_PER_M || 0);
+    const chatInRate = Number(process.env.ELIMENI_OPENAI_CHAT_INPUT_USD_PER_M || 0);
+    const chatOutRate = Number(process.env.ELIMENI_OPENAI_CHAT_OUTPUT_USD_PER_M || 0);
     const contentInRate = Number(process.env.ELIMENI_OPENAI_CONTENT_INPUT_USD_PER_M || 0);
     const contentOutRate = Number(process.env.ELIMENI_OPENAI_CONTENT_OUTPUT_USD_PER_M || 0);
-    const contentCost = creativeUsage ? ((creativeUsage.input_tokens || 0) * contentInRate + (creativeUsage.output_tokens || 0) * contentOutRate) / 1_000_000 : 0;
-    const estimatedCost = estimateCost(provider, model, usage) + contentCost;
+    const modelCost = ((usage?.input_tokens || 0) * (activeBuildTask ? buildInRate : chatInRate)
+        + (usage?.output_tokens || 0) * (activeBuildTask ? buildOutRate : chatOutRate)) / 1_000_000;
+    const contentCost = creativeUsage ? ((creativeUsage.input_tokens || 0) * contentInRate
+        + (creativeUsage.output_tokens || 0) * contentOutRate) / 1_000_000 : 0;
+    const estimatedCost = modelCost + contentCost;
+    const pricingConfigured = activeBuildTask
+        ? buildInRate > 0 && buildOutRate > 0 && contentInRate > 0 && contentOutRate > 0
+        : chatInRate > 0 && chatOutRate > 0;
     const creditsToCharge = await creditsFromCost(estimatedCost); // REAL credits
 
     await supabase.rpc('deduct_credits', {
@@ -290,11 +334,13 @@ router.post('/message', asyncHandler(async (req, res) => {
             model,
             input_tokens:  usage?.input_tokens  || 0,
             output_tokens: usage?.output_tokens || 0,
-            estimated_cost: estimatedCost,
+            estimated_cost: pricingConfigured ? estimatedCost : null,
+            pricing_configured: pricingConfigured,
             session_id: activeSessionId,
             openai_content_tokens: creativeUsage || null,
             generated_asset_status: heroAsset?.status || null,
             usage_estimate_excludes_image_generation: true,
+            model_cost_usd: pricingConfigured ? modelCost : null,
             openai_content_cost_usd: contentCost,
         },
         created_at:  new Date().toISOString(),

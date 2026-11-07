@@ -24,6 +24,10 @@ async function executeWorkflow(site, actions) {
       if (validationErrors.length) throw new Error(validationErrors.join('; '));
       const result = await executeAction(site, action);
       const output = result.data?.result || result.result || {};
+      if (output.failed === true) {
+        results.push({ action: action.action, success: false, partial: true, created: output.created, error: output.error || 'Partial product upload' });
+        break;
+      }
       const entry = { action: action.action, title: original.title || null, slug: original.slug || null, ...result };
       results.push(entry);
       if (result.success && Number(output.page_id) > 0) pages.set(key(original.slug || original.title), Number(output.page_id));
